@@ -1,3 +1,9 @@
+vim (2:8.0.1026-1hnakamur1) xenial; urgency=medium
+
+  * Upstream release 8.0.1026
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Thu, 31 Aug 2017 18:57:39 +0900
+
 vim (2:8.0.0095-1ubuntu3hnakamur2) xenial; urgency=medium
 
   * Retry building at PPA 
