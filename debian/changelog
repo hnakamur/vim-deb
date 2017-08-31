@@ -1,3 +1,9 @@
+vim (2:8.0.0095-1ubuntu3hnakamur2) xenial; urgency=medium
+
+  * Retry building at PPA 
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Thu, 31 Aug 2017 18:53:21 +0900
+
 vim (2:8.0.0095-1ubuntu3hnakamur1) xenial; urgency=medium
 
   * Backport to Ubuntu 16.04
