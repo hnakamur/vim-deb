@@ -12,14 +12,14 @@
  * Not used for GTK.
  */
 
+#include "vim.h"
+
 #include <X11/keysym.h>
 #include <X11/Xatom.h>
 #include <X11/StringDefs.h>
 #include <X11/Intrinsic.h>
 #include <X11/Shell.h>
 #include <X11/cursorfont.h>
-
-#include "vim.h"
 
 /*
  * For Workshop XpmP.h is preferred, because it makes the signs drawn with a
@@ -136,20 +136,11 @@ static guicolor_T	prev_sp_color = INVALCOLOR;
 static XButtonPressedEvent last_mouse_event;
 #endif
 
-static void gui_x11_timer_cb(XtPointer timed_out, XtIntervalId *interval_id);
-static void gui_x11_visibility_cb(Widget w, XtPointer dud, XEvent *event, Boolean *dum);
-static void gui_x11_expose_cb(Widget w, XtPointer dud, XEvent *event, Boolean *dum);
-static void gui_x11_resize_window_cb(Widget w, XtPointer dud, XEvent *event, Boolean *dum);
-static void gui_x11_focus_change_cb(Widget w, XtPointer data, XEvent *event, Boolean *dum);
-static void gui_x11_enter_cb(Widget w, XtPointer data, XEvent *event, Boolean *dum);
-static void gui_x11_leave_cb(Widget w, XtPointer data, XEvent *event, Boolean *dum);
-static void gui_x11_mouse_cb(Widget w, XtPointer data, XEvent *event, Boolean *dum);
 static void gui_x11_check_copy_area(void);
 #ifdef FEAT_CLIENTSERVER
 static void gui_x11_send_event_handler(Widget, XtPointer, XEvent *, Boolean *);
 #endif
 static void gui_x11_wm_protocol_handler(Widget, XtPointer, XEvent *, Boolean *);
-static void gui_x11_blink_cb(XtPointer timed_out, XtIntervalId *interval_id);
 static Cursor gui_x11_create_blank_mouse(void);
 static void draw_curl(int row, int col, int cells);
 
@@ -573,6 +564,25 @@ gui_x11_timer_cb(
 {
     *((int *)timed_out) = TRUE;
 }
+
+#ifdef FEAT_JOB_CHANNEL
+    static void
+channel_poll_cb(
+    XtPointer	    client_data,
+    XtIntervalId    *interval_id UNUSED)
+{
+    XtIntervalId    *channel_timer = (XtIntervalId *)client_data;
+
+    /* Using an event handler for a channel that may be disconnected does
+     * not work, it hangs.  Instead poll for messages. */
+    channel_handle_events(TRUE);
+    parse_queued_messages();
+
+    /* repeat */
+    *channel_timer = XtAppAddTimeOut(app_context, (long_u)20,
+						 channel_poll_cb, client_data);
+}
+#endif
 
     static void
 gui_x11_visibility_cb(
@@ -1992,14 +2002,40 @@ gui_mch_get_font(char_u *name, int giveErrorIfMissing)
 #if defined(FEAT_EVAL) || defined(PROTO)
 /*
  * Return the name of font "font" in allocated memory.
- * Don't know how to get the actual name, thus use the provided name.
  */
     char_u *
-gui_mch_get_fontname(GuiFont font UNUSED, char_u *name)
+gui_mch_get_fontname(GuiFont font, char_u *name)
 {
-    if (name == NULL)
-	return NULL;
-    return vim_strsave(name);
+    char_u *ret = NULL;
+
+    if (name != NULL && font == NULL)
+    {
+	/* In this case, there's no way other than doing this. */
+	ret = vim_strsave(name);
+    }
+    else if (font != NULL)
+    {
+	/* In this case, try to retrieve the XLFD corresponding to 'font'->fid;
+	 * if failed, use 'name' unless it's NULL. */
+	unsigned long value = 0L;
+
+	if (XGetFontProperty(font, XA_FONT, &value))
+	{
+	    char *xa_font_name = NULL;
+
+	    xa_font_name = XGetAtomName(gui.dpy, value);
+	    if (xa_font_name != NULL)
+	    {
+		ret = vim_strsave((char_u *)xa_font_name);
+		XFree(xa_font_name);
+	    }
+	    else if (name != NULL)
+		ret = vim_strsave(name);
+	}
+	else if (name != NULL)
+	    ret = vim_strsave(name);
+    }
+    return ret;
 }
 #endif
 
@@ -2244,10 +2280,6 @@ fontset_ascent(XFontSet fs)
 gui_mch_get_color(char_u *name)
 {
     guicolor_T  requested;
-    XColor      available;
-    Colormap	colormap;
-#define COLORSPECBUFSIZE 8 /* space enough to hold "#RRGGBB" */
-    char        spec[COLORSPECBUFSIZE];
 
     /* can't do this when GUI not running */
     if (!gui.in_use || name == NULL || *name == NUL)
@@ -2257,11 +2289,24 @@ gui_mch_get_color(char_u *name)
     if (requested == INVALCOLOR)
 	return INVALCOLOR;
 
-    vim_snprintf(spec, COLORSPECBUFSIZE, "#%.2x%.2x%.2x",
+    return gui_mch_get_rgb_color(
 	    (requested & 0xff0000) >> 16,
 	    (requested & 0xff00) >> 8,
 	    requested & 0xff);
-#undef COLORSPECBUFSIZE
+}
+
+/*
+ * Return the Pixel value (color) for the given RGB values.
+ * Return INVALCOLOR for error.
+ */
+    guicolor_T
+gui_mch_get_rgb_color(int r, int g, int b)
+{
+    char        spec[8]; /* space enough to hold "#RRGGBB" */
+    XColor      available;
+    Colormap	colormap;
+
+    vim_snprintf(spec, sizeof(spec), "#%.2x%.2x%.2x", r, g, b);
     colormap = DefaultColormap(gui.dpy, DefaultScreen(gui.dpy));
     if (XParseColor(gui.dpy, colormap, (char *)spec, &available) != 0
 	    && XAllocColor(gui.dpy, colormap, &available) != 0)
@@ -2663,12 +2708,22 @@ gui_mch_wait_for_chars(long wtime)
     static int	    timed_out;
     XtIntervalId    timer = (XtIntervalId)0;
     XtInputMask	    desired;
+#ifdef FEAT_JOB_CHANNEL
+    XtIntervalId    channel_timer = (XtIntervalId)0;
+#endif
 
     timed_out = FALSE;
 
     if (wtime > 0)
 	timer = XtAppAddTimeOut(app_context, (long_u)wtime, gui_x11_timer_cb,
 								  &timed_out);
+#ifdef FEAT_JOB_CHANNEL
+    /* If there is a channel with the keep_open flag we need to poll for input
+     * on them. */
+    if (channel_any_keep_open())
+	channel_timer = XtAppAddTimeOut(app_context, (long_u)20,
+				   channel_poll_cb, (XtPointer)&channel_timer);
+#endif
 
     focus = gui.in_focus;
 #ifdef ALT_X_INPUT
@@ -2720,6 +2775,10 @@ gui_mch_wait_for_chars(long wtime)
 
     if (timer != (XtIntervalId)0 && !timed_out)
 	XtRemoveTimeOut(timer);
+#ifdef FEAT_JOB_CHANNEL
+    if (channel_timer != (XtIntervalId)0)
+	XtRemoveTimeOut(channel_timer);
+#endif
 
     return retval;
 }
@@ -3052,25 +3111,6 @@ gui_mch_stop_blink(void)
     blink_state = BLINK_NONE;
 }
 
-/*
- * Start the cursor blinking.  If it was already blinking, this restarts the
- * waiting time and shows the cursor.
- */
-    void
-gui_mch_start_blink(void)
-{
-    if (blink_timer != (XtIntervalId)0)
-	XtRemoveTimeOut(blink_timer);
-    /* Only switch blinking on if none of the times is zero */
-    if (blink_waittime && blink_ontime && blink_offtime && gui.in_focus)
-    {
-	blink_timer = XtAppAddTimeOut(app_context, blink_waittime,
-						      gui_x11_blink_cb, NULL);
-	blink_state = BLINK_ON;
-	gui_update_cursor(TRUE, FALSE);
-    }
-}
-
     static void
 gui_x11_blink_cb(
     XtPointer	    timed_out UNUSED,
@@ -3089,6 +3129,25 @@ gui_x11_blink_cb(
 	blink_state = BLINK_ON;
 	blink_timer = XtAppAddTimeOut(app_context, blink_ontime,
 						      gui_x11_blink_cb, NULL);
+    }
+}
+
+/*
+ * Start the cursor blinking.  If it was already blinking, this restarts the
+ * waiting time and shows the cursor.
+ */
+    void
+gui_mch_start_blink(void)
+{
+    if (blink_timer != (XtIntervalId)0)
+	XtRemoveTimeOut(blink_timer);
+    /* Only switch blinking on if none of the times is zero */
+    if (blink_waittime && blink_ontime && blink_offtime && gui.in_focus)
+    {
+	blink_timer = XtAppAddTimeOut(app_context, blink_waittime,
+						      gui_x11_blink_cb, NULL);
+	blink_state = BLINK_ON;
+	gui_update_cursor(TRUE, FALSE);
     }
 }
 

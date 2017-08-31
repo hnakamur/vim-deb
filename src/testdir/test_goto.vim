@@ -273,3 +273,39 @@ func Test_gd_string_only()
 	\ ]
   call XTest_goto_decl('gd', lines, 5, 10)
 endfunc
+
+" Check that setting 'cursorline' does not change curswant
+func Test_cursorline_keep_col()
+  new
+  call setline(1, ['long long long line', 'short line'])
+  normal ggfi
+  let pos = getcurpos()
+  normal j
+  set cursorline
+  normal k
+  call assert_equal(pos, getcurpos())
+  bwipe!
+  set nocursorline
+endfunc
+
+func Test_gd_local_block()
+  let lines = [
+	\ '  int main()',
+	\ '{',
+	\ '  char *a = "NOT NULL";',
+	\ '  if(a)',
+	\ '  {',
+	\ '    char *b = a;',
+	\ '    printf("%s\n", b);',
+	\ '  }',
+	\ '  else',
+	\ '  {',
+	\ '    char *b = "NULL";',
+	\ '    return b;',
+	\ '  }',
+	\ '',
+	\ '  return 0;',
+	\ '}',
+  \ ]
+  call XTest_goto_decl('1gd', lines, 11, 11)
+endfunc

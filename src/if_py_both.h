@@ -582,9 +582,9 @@ VimTryStart(void)
 VimTryEnd(void)
 {
     --trylevel;
-    /* Without this it stops processing all subsequent VimL commands and
-     * generates strange error messages if I e.g. try calling Test() in a
-     * cycle */
+    /* Without this it stops processing all subsequent Vim script commands and
+     * generates strange error messages if I e.g. try calling Test() in a cycle
+     */
     did_emsg = FALSE;
     /* Keyboard interrupt should be preferred over anything else */
     if (got_int)
@@ -625,7 +625,7 @@ VimTryEnd(void)
 	discard_current_exception();
 	return -1;
     }
-    /* Finally transform VimL exception to python one */
+    /* Finally transform Vim script exception to python one */
     else
     {
 	PyErr_SetVim((char *)current_exception->value);
@@ -4263,43 +4263,6 @@ py_fix_cursor(linenr_T lo, linenr_T hi, linenr_T extra)
 }
 
 /*
- * Find a window that contains "buf" and switch to it.
- * If there is no such window, use the current window and change "curbuf".
- * Caller must initialize save_curbuf to NULL.
- * restore_win_for_buf() MUST be called later!
- */
-    static void
-switch_to_win_for_buf(
-    buf_T	*buf,
-    win_T	**save_curwinp,
-    tabpage_T	**save_curtabp,
-    bufref_T	*save_curbuf)
-{
-    win_T	*wp;
-    tabpage_T	*tp;
-
-    if (find_win_for_buf(buf, &wp, &tp) == FAIL)
-	switch_buffer(save_curbuf, buf);
-    else if (switch_win(save_curwinp, save_curtabp, wp, tp, TRUE) == FAIL)
-    {
-	restore_win(*save_curwinp, *save_curtabp, TRUE);
-	switch_buffer(save_curbuf, buf);
-    }
-}
-
-    static void
-restore_win_for_buf(
-    win_T	*save_curwin,
-    tabpage_T	*save_curtab,
-    bufref_T	*save_curbuf)
-{
-    if (save_curbuf->br_buf == NULL)
-	restore_win(save_curwin, save_curtab, TRUE);
-    else
-	restore_buffer(save_curbuf);
-}
-
-/*
  * Replace a line in the specified buffer. The line number is
  * in Vim format (1-based). The replacement line is given as
  * a Python string object. The object is checked for validity
@@ -4311,7 +4274,7 @@ restore_win_for_buf(
     static int
 SetBufferLine(buf_T *buf, PyInt n, PyObject *line, PyInt *len_change)
 {
-    bufref_T	save_curbuf = {NULL, 0};
+    bufref_T	save_curbuf = {NULL, 0, 0};
     win_T	*save_curwin = NULL;
     tabpage_T	*save_curtab = NULL;
 
@@ -4415,7 +4378,7 @@ SetBufferLineList(
 	PyObject *list,
 	PyInt *len_change)
 {
-    bufref_T	save_curbuf = {NULL, 0};
+    bufref_T	save_curbuf = {NULL, 0, 0};
     win_T	*save_curwin = NULL;
     tabpage_T	*save_curtab = NULL;
 
@@ -4616,7 +4579,7 @@ SetBufferLineList(
     static int
 InsertBufferLines(buf_T *buf, PyInt n, PyObject *lines, PyInt *len_change)
 {
-    bufref_T	save_curbuf = {NULL, 0};
+    bufref_T	save_curbuf = {NULL, 0, 0};
     win_T	*save_curwin = NULL;
     tabpage_T	*save_curtab = NULL;
 
@@ -5619,6 +5582,7 @@ run_do(const char *cmd, void *arg UNUSED
     int		status;
     PyObject	*pyfunc, *pymain;
     PyObject	*run_ret;
+    buf_T	*was_curbuf = curbuf;
 
     if (u_save((linenr_T)RangeStart - 1, (linenr_T)RangeEnd + 1) != OK)
     {
@@ -5671,7 +5635,9 @@ run_do(const char *cmd, void *arg UNUSED
 #ifdef PY_CAN_RECURSE
 	*pygilstate = PyGILState_Ensure();
 #endif
-	if (!(line = GetBufferLine(curbuf, lnum)))
+	/* Check the line number, the command my have deleted lines. */
+	if (lnum > curbuf->b_ml.ml_line_count
+		|| !(line = GetBufferLine(curbuf, lnum)))
 	    goto err;
 	if (!(linenr = PyInt_FromLong((long) lnum)))
 	{
@@ -5684,9 +5650,19 @@ run_do(const char *cmd, void *arg UNUSED
 	if (!ret)
 	    goto err;
 
+	/* Check that the command didn't switch to another buffer. */
+	if (curbuf != was_curbuf)
+	{
+	    Py_XDECREF(ret);
+	    goto err;
+	}
+
 	if (ret != Py_None)
 	    if (SetBufferLine(curbuf, lnum, ret, NULL) == FAIL)
+	    {
+		Py_XDECREF(ret);
 		goto err;
+	    }
 
 	Py_XDECREF(ret);
 	PythonIO_Flush();

@@ -8,9 +8,13 @@ source shared.vim
 
 let s:python = PythonProg()
 if s:python == ''
-  " Can't run this test.
+  " Can't run this test without Python.
   finish
 endif
+
+" Uncomment the next line to see what happens. Output is in
+" src/testdir/channellog.
+" call ch_logfile('channellog', 'w')
 
 let s:chopt = {}
 
@@ -26,9 +30,12 @@ func Ch_requestHandler(handle, msg)
 endfunc
 
 func Ch_communicate(port)
+  " Avoid dropping messages, since we don't use a callback here.
+  let s:chopt.drop = 'never'
   let handle = ch_open('localhost:' . a:port, s:chopt)
+  unlet s:chopt.drop
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
   if has('job')
@@ -57,6 +64,9 @@ func Ch_communicate(port)
 
   " string with ][ should work
   call assert_equal('this][that', ch_evalexpr(handle, 'echo this][that'))
+
+  " nothing to read now
+  call assert_equal(0, ch_canread(handle))
 
   " sending three messages quickly then reading should work
   for i in range(3)
@@ -87,7 +97,7 @@ func Ch_communicate(port)
   call ch_sendexpr(handle, 'hello!', {'callback': 'Ch_requestHandler'})
   call WaitFor('exists("g:Ch_responseHandle")')
   if !exists('g:Ch_responseHandle')
-    call assert_false(1, 'g:Ch_responseHandle was not set')
+    call assert_report('g:Ch_responseHandle was not set')
   else
     call assert_equal(handle, g:Ch_responseHandle)
     unlet g:Ch_responseHandle
@@ -98,7 +108,7 @@ func Ch_communicate(port)
   call ch_sendexpr(handle, 'hello!', {'callback': function('Ch_requestHandler')})
   call WaitFor('exists("g:Ch_responseHandle")')
   if !exists('g:Ch_responseHandle')
-    call assert_false(1, 'g:Ch_responseHandle was not set')
+    call assert_report('g:Ch_responseHandle was not set')
   else
     call assert_equal(handle, g:Ch_responseHandle)
     unlet g:Ch_responseHandle
@@ -110,7 +120,7 @@ func Ch_communicate(port)
   call ch_sendexpr(handle, 'hello!', {'callback': {a, b -> Ch_requestHandler(a, b)}})
   call WaitFor('exists("g:Ch_responseHandle")')
   if !exists('g:Ch_responseHandle')
-    call assert_false(1, 'g:Ch_responseHandle was not set')
+    call assert_report('g:Ch_responseHandle was not set')
   else
     call assert_equal(handle, g:Ch_responseHandle)
     unlet g:Ch_responseHandle
@@ -126,6 +136,9 @@ func Ch_communicate(port)
   call ch_setoptions(handle, {'mode': 'json'})
   call assert_fails("call ch_setoptions(handle, {'waittime': 111})", "E475")
   call ch_setoptions(handle, {'callback': ''})
+  call ch_setoptions(handle, {'drop': 'never'})
+  call ch_setoptions(handle, {'drop': 'auto'})
+  call assert_fails("call ch_setoptions(handle, {'drop': 'bad'})", "E475")
 
   " Send an eval request that works.
   call assert_equal('ok', ch_evalexpr(handle, 'eval-works'))
@@ -200,7 +213,7 @@ func Ch_two_channels(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   call assert_equal(v:t_channel, type(handle))
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
 
@@ -208,7 +221,7 @@ func Ch_two_channels(port)
 
   let newhandle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(newhandle) == "fail"
-    call assert_false(1, "Can't open second channel")
+    call assert_report("Can't open second channel")
     return
   endif
   call assert_equal('got it', ch_evalexpr(newhandle, 'hello!'))
@@ -229,7 +242,7 @@ endfunc
 func Ch_server_crash(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
 
@@ -246,6 +259,7 @@ endfunc
 """""""""
 
 func Ch_handler(chan, msg)
+  call ch_log('Ch_handler()')
   unlet g:Ch_reply
   let g:Ch_reply = a:msg
 endfunc
@@ -253,7 +267,7 @@ endfunc
 func Ch_channel_handler(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
 
@@ -296,7 +310,7 @@ endfunc
 func Ch_channel_zero(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
 
@@ -363,12 +377,12 @@ endfunc
 func Ch_raw_one_time_callback(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
   call ch_setoptions(handle, {'mode': 'raw'})
 
-  " The message are sent raw, we do our own JSON strings here.
+  " The messages are sent raw, we do our own JSON strings here.
   call ch_sendraw(handle, "[1, \"hello!\"]\n", {'callback': 'Ch_handleRaw1'})
   call WaitFor('g:Ch_reply1 != ""')
   call assert_equal("[1, \"got it\"]", g:Ch_reply1)
@@ -419,7 +433,7 @@ func Test_connect_waittime()
     endif
   catch
     if v:exception !~ 'Connection reset by peer'
-      call assert_false(1, "Caught exception: " . v:exception)
+      call assert_report("Caught exception: " . v:exception)
     endif
   endtry
 endfunc
@@ -431,7 +445,10 @@ func Test_raw_pipe()
     return
   endif
   call ch_log('Test_raw_pipe()')
-  let job = job_start(s:python . " test_channel_pipe.py", {'mode': 'raw'})
+  " Add a dummy close callback to avoid that messages are dropped when calling
+  " ch_canread().
+  let job = job_start(s:python . " test_channel_pipe.py",
+	\ {'mode': 'raw', 'drop': 'never'})
   call assert_equal(v:t_job, type(job))
   call assert_equal("run", job_status(job))
 
@@ -458,6 +475,9 @@ func Test_raw_pipe()
     call assert_equal("something\n", substitute(msg, "\r", "", 'g'))
 
     call ch_sendraw(job, "double this\n")
+    let g:handle = job_getchannel(job)
+    call WaitFor('ch_canread(g:handle)')
+    unlet g:handle
     let msg = ch_readraw(job)
     call assert_equal("this\nAND this\n", substitute(msg, "\r", "", 'g'))
 
@@ -717,6 +737,38 @@ endfunc
 
 func Test_pipe_to_buffer_name_nomsg()
   call Run_test_pipe_to_buffer(1, 0, 1)
+endfunc
+
+func Test_close_output_buffer()
+  if !has('job')
+    return
+  endif
+  enew!
+  let test_lines = ['one', 'two']
+  call setline(1, test_lines)
+  call ch_log('Test_close_output_buffer()')
+  let options = {'out_io': 'buffer'}
+  let options['out_name'] = 'buffer-output'
+  let options['out_msg'] = 0
+  split buffer-output
+  let job = job_start(s:python . " test_channel_write.py", options)
+  call assert_equal("run", job_status(job))
+  try
+    call WaitFor('line("$") == 3')
+    call assert_equal(3, line('$'))
+    quit!
+    sleep 100m
+    " Make sure the write didn't happen to the wrong buffer.
+    call assert_equal(test_lines, getline(1, line('$')))
+    call assert_equal(-1, bufwinnr('buffer-output'))
+    sbuf buffer-output
+    call assert_notequal(-1, bufwinnr('buffer-output'))
+    sleep 100m
+    close  " no more writes
+    bwipe!
+  finally
+    call job_stop(job)
+  endtry
 endfunc
 
 func Run_test_pipe_err_to_buffer(use_name, nomod, do_msg)
@@ -1125,7 +1177,11 @@ func Test_out_cb()
 
   let dict = {'thisis': 'dict: '}
   func dict.outHandler(chan, msg) dict
-    let g:Ch_outmsg = self.thisis . a:msg
+    if type(a:msg) == v:t_string
+      let g:Ch_outmsg = self.thisis . a:msg
+    else
+      let g:Ch_outobj = a:msg
+    endif
   endfunc
   func dict.errHandler(chan, msg) dict
     let g:Ch_errmsg = self.thisis . a:msg
@@ -1145,6 +1201,12 @@ func Test_out_cb()
     call assert_equal("dict: hello", g:Ch_outmsg)
     call WaitFor('g:Ch_errmsg != ""')
     call assert_equal("dict: there", g:Ch_errmsg)
+
+    " Receive a json object split in pieces
+    unlet! g:Ch_outobj
+    call ch_sendraw(job, "echosplit [0, {\"one\": 1,| \"tw|o\": 2, \"three\": 3|}]\n")
+    call WaitFor('exists("g:Ch_outobj")')
+    call assert_equal({'one': 1, 'two': 2, 'three': 3}, g:Ch_outobj)
   finally
     call job_stop(job)
   endtry
@@ -1317,7 +1379,7 @@ func Ch_open_delay(port)
   let channel = ch_open('localhost:' . a:port, s:chopt)
   unlet s:chopt.waittime
   if ch_status(channel) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
   call assert_equal('got it', ch_evalexpr(channel, 'hello!'))
@@ -1339,7 +1401,7 @@ endfunc
 function Ch_test_call(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
 
@@ -1437,7 +1499,7 @@ endfunc
 function Ch_test_close_callback(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
   call ch_setoptions(handle, {'close_cb': 'MyCloseCb'})
@@ -1455,7 +1517,7 @@ endfunc
 function Ch_test_close_partial(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
   let g:Ch_d = {}
@@ -1574,12 +1636,7 @@ func Test_read_nonl_line()
   endif
 
   let g:linecount = 0
-  if has('win32')
-    " workaround: 'shellescape' does improper escaping double quotes
-    let arg = 'import sys;sys.stdout.write(\"1\n2\n3\")'
-  else
-    let arg = 'import sys;sys.stdout.write("1\n2\n3")'
-  endif
+  let arg = 'import sys;sys.stdout.write("1\n2\n3")'
   call job_start([s:python, '-c', arg], {'callback': 'MyLineCountCb'})
   call WaitFor('3 <= g:linecount')
   call assert_equal(3, g:linecount)
@@ -1591,21 +1648,55 @@ func Test_read_from_terminated_job()
   endif
 
   let g:linecount = 0
-  if has('win32')
-    " workaround: 'shellescape' does improper escaping double quotes 
-    let arg = 'import os,sys;os.close(1);sys.stderr.write(\"test\n\")'
-  else
-    let arg = 'import os,sys;os.close(1);sys.stderr.write("test\n")'
-  endif
+  let arg = 'import os,sys;os.close(1);sys.stderr.write("test\n")'
   call job_start([s:python, '-c', arg], {'callback': 'MyLineCountCb'})
   call WaitFor('1 <= g:linecount')
   call assert_equal(1, g:linecount)
 endfunc
 
+func Test_env()
+  if !has('job')
+    return
+  endif
+
+  let g:envstr = ''
+  if has('win32')
+    call job_start(['cmd', '/c', 'echo %FOO%'], {'callback': {ch,msg->execute(":let g:envstr .= msg")}, 'env':{'FOO': 'bar'}})
+  else
+    call job_start([&shell, &shellcmdflag, 'echo $FOO'], {'callback': {ch,msg->execute(":let g:envstr .= msg")}, 'env':{'FOO': 'bar'}})
+  endif
+  call WaitFor('"" != g:envstr')
+  call assert_equal("bar", g:envstr)
+  unlet g:envstr
+endfunc
+
+func Test_cwd()
+  if !has('job')
+    return
+  endif
+
+  let g:envstr = ''
+  if has('win32')
+    let expect = $TEMP
+    call job_start(['cmd', '/c', 'echo %CD%'], {'callback': {ch,msg->execute(":let g:envstr .= msg")}, 'cwd': expect})
+  else
+    let expect = $HOME
+    call job_start(['pwd'], {'callback': {ch,msg->execute(":let g:envstr .= msg")}, 'cwd': expect})
+  endif
+  call WaitFor('"" != g:envstr')
+  let expect = substitute(expect, '[/\\]$', '', '')
+  let g:envstr = substitute(g:envstr, '[/\\]$', '', '')
+  if $CI != '' && stridx(g:envstr, '/private/') == 0
+    let g:envstr = g:envstr[8:]
+  endif
+  call assert_equal(expect, g:envstr)
+  unlet g:envstr
+endfunc
+
 function Ch_test_close_lambda(port)
   let handle = ch_open('localhost:' . a:port, s:chopt)
   if ch_status(handle) == "fail"
-    call assert_false(1, "Can't open channel")
+    call assert_report("Can't open channel")
     return
   endif
   let g:Ch_close_ret = ''
@@ -1621,5 +1712,50 @@ func Test_close_lambda()
   call s:run_server('Ch_test_close_lambda')
 endfunc
 
-" Uncomment this to see what happens, output is in src/testdir/channellog.
-" call ch_logfile('channellog', 'w')
+func s:test_list_args(cmd, out, remove_lf)
+  try
+    let g:out = ''
+    call job_start([s:python, '-c', a:cmd], {'callback': {ch, msg -> execute('let g:out .= msg')}, 'out_mode': 'raw'})
+    call WaitFor('"" != g:out')
+    if has('win32')
+      let g:out = substitute(g:out, '\r', '', 'g')
+    endif
+    if a:remove_lf
+      let g:out = substitute(g:out, '\n$', '', 'g')
+    endif
+    call assert_equal(a:out, g:out)
+  finally
+    unlet g:out
+  endtry
+endfunc
+
+func Test_list_args()
+  if !has('job')
+    return
+  endif
+
+  call s:test_list_args('import sys;sys.stdout.write("hello world")', "hello world", 0)
+  call s:test_list_args('import sys;sys.stdout.write("hello\nworld")', "hello\nworld", 0)
+  call s:test_list_args('import sys;sys.stdout.write(''hello\nworld'')', "hello\nworld", 0)
+  call s:test_list_args('import sys;sys.stdout.write(''hello"world'')', "hello\"world", 0)
+  call s:test_list_args('import sys;sys.stdout.write(''hello^world'')', "hello^world", 0)
+  call s:test_list_args('import sys;sys.stdout.write("hello&&world")', "hello&&world", 0)
+  call s:test_list_args('import sys;sys.stdout.write(''hello\\world'')', "hello\\world", 0)
+  call s:test_list_args('import sys;sys.stdout.write(''hello\\\\world'')', "hello\\\\world", 0)
+  call s:test_list_args('import sys;sys.stdout.write("hello\"world\"")', 'hello"world"', 0)
+  call s:test_list_args('import sys;sys.stdout.write("h\"ello worl\"d")', 'h"ello worl"d', 0)
+  call s:test_list_args('import sys;sys.stdout.write("h\"e\\\"llo wor\\\"l\"d")', 'h"e\"llo wor\"l"d', 0)
+  call s:test_list_args('import sys;sys.stdout.write("h\"e\\\"llo world")', 'h"e\"llo world', 0)
+  call s:test_list_args('import sys;sys.stdout.write("hello\tworld")', "hello\tworld", 0)
+
+  " tests which not contain spaces in the argument
+  call s:test_list_args('print("hello\nworld")', "hello\nworld", 1)
+  call s:test_list_args('print(''hello\nworld'')', "hello\nworld", 1)
+  call s:test_list_args('print(''hello"world'')', "hello\"world", 1)
+  call s:test_list_args('print(''hello^world'')', "hello^world", 1)
+  call s:test_list_args('print("hello&&world")', "hello&&world", 1)
+  call s:test_list_args('print(''hello\\world'')', "hello\\world", 1)
+  call s:test_list_args('print(''hello\\\\world'')', "hello\\\\world", 1)
+  call s:test_list_args('print("hello\"world\"")', 'hello"world"', 1)
+  call s:test_list_args('print("hello\tworld")', "hello\tworld", 1)
+endfunc

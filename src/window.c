@@ -870,9 +870,9 @@ win_split_ins(
 
 	/* We don't like to take lines for the new window from a
 	 * 'winfixwidth' window.  Take them from a window to the left or right
-	 * instead, if possible. */
+	 * instead, if possible. Add one for the separator. */
 	if (oldwin->w_p_wfw)
-	    win_setwidth_win(oldwin->w_width + new_size, oldwin);
+	    win_setwidth_win(oldwin->w_width + new_size + 1, oldwin);
 
 	/* Only make all windows the same width if one of them (except oldwin)
 	 * is wider than one of the split windows. */
@@ -2107,7 +2107,7 @@ win_equal_rec(
 }
 
 /*
- * close all windows for buffer 'buf'
+ * Close all windows for buffer "buf".
  */
     void
 close_windows(
@@ -2131,7 +2131,10 @@ close_windows(
 #endif
 		)
 	{
-	    win_close(wp, FALSE);
+	    if (win_close(wp, FALSE) == FAIL)
+		/* If closing the window fails give up, to avoid looping
+		 * forever. */
+		break;
 
 	    /* Start all over, autocommands may change the window layout. */
 	    wp = firstwin;
@@ -2279,6 +2282,7 @@ win_close(win_T *win, int free_buf)
     int		dir;
     int		help_window = FALSE;
     tabpage_T   *prev_curtab = curtab;
+    frame_T	*win_frame = win->w_frame->fr_parent;
 
     if (last_window())
     {
@@ -2310,7 +2314,7 @@ win_close(win_T *win, int free_buf)
 
     /* When closing the help window, try restoring a snapshot after closing
      * the window.  Otherwise clear the snapshot, it's now invalid. */
-    if (win->w_buffer != NULL && win->w_buffer->b_help)
+    if (bt_help(win->w_buffer))
 	help_window = TRUE;
     else
 	clear_snapshot(curtab, SNAP_HELP_IDX);
@@ -2393,7 +2397,7 @@ win_close(win_T *win, int free_buf)
 	    && (last_window() || curtab != prev_curtab
 		|| close_last_window_tabpage(win, free_buf, prev_curtab)))
     {
-	/* Autocommands have close all windows, quit now.  Restore
+	/* Autocommands have closed all windows, quit now.  Restore
 	 * curwin->w_buffer, otherwise writing viminfo may fail. */
 	if (curwin->w_buffer == NULL)
 	    curwin->w_buffer = curbuf;
@@ -2450,9 +2454,15 @@ win_close(win_T *win, int free_buf)
 #endif
 	curbuf = curwin->w_buffer;
 	close_curwin = TRUE;
+
+	/* The cursor position may be invalid if the buffer changed after last
+	 * using the window. */
+	check_cursor();
     }
     if (p_ea && (*p_ead == 'b' || *p_ead == dir))
-	win_equal(curwin, TRUE, dir);
+	/* If the frame of the closed window contains the new current window,
+	 * only resize that frame.  Otherwise resize all windows. */
+	win_equal(curwin, curwin->w_frame->fr_parent == win_frame, dir);
     else
 	win_comp_pos();
     if (close_curwin)
@@ -3369,7 +3379,8 @@ close_others(
 #endif
 		    continue;
 	    }
-	    win_close(wp, !P_HID(wp->w_buffer) && !bufIsChanged(wp->w_buffer));
+	    win_close(wp, !buf_hide(wp->w_buffer)
+					       && !bufIsChanged(wp->w_buffer));
 	}
     }
 
@@ -3752,6 +3763,59 @@ valid_tabpage(tabpage_T *tpc)
 	if (tp == tpc)
 	    return TRUE;
     return FALSE;
+}
+
+/*
+ * Return TRUE when "tpc" points to a valid tab page and at least one window is
+ * valid.
+ */
+    int
+valid_tabpage_win(tabpage_T *tpc)
+{
+    tabpage_T	*tp;
+    win_T	*wp;
+
+    FOR_ALL_TABPAGES(tp)
+    {
+	if (tp == tpc)
+	{
+	    FOR_ALL_WINDOWS_IN_TAB(tp, wp)
+	    {
+		if (win_valid_any_tab(wp))
+		    return TRUE;
+	    }
+	    return FALSE;
+	}
+    }
+    /* shouldn't happen */
+    return FALSE;
+}
+
+/*
+ * Close tabpage "tab", assuming it has no windows in it.
+ * There must be another tabpage or this will crash.
+ */
+    void
+close_tabpage(tabpage_T *tab)
+{
+    tabpage_T	*ptp;
+
+    if (tab == first_tabpage)
+    {
+	first_tabpage = tab->tp_next;
+	ptp = first_tabpage;
+    }
+    else
+    {
+	for (ptp = first_tabpage; ptp != NULL && ptp->tp_next != tab;
+							    ptp = ptp->tp_next)
+	    ;
+	assert(ptp != NULL);
+	ptp->tp_next = tab->tp_next;
+    }
+
+    goto_tabpage_tp(ptp, FALSE, FALSE);
+    free_tabpage(tab);
 }
 
 /*
@@ -5708,7 +5772,10 @@ win_new_height(win_T *wp, int height)
     wp->w_height = height;
     wp->w_skipcol = 0;
 
-    scroll_to_fraction(wp, prev_height);
+    /* There is no point in adjusting the scroll position when exiting.  Some
+     * values might be invalid. */
+    if (!exiting)
+	scroll_to_fraction(wp, prev_height);
 }
 
     void
@@ -6124,7 +6191,7 @@ file_name_in_line(
      */
     ptr = line + col;
     while (*ptr != NUL && !vim_isfilec(*ptr))
-	mb_ptr_adv(ptr);
+	MB_PTR_ADV(ptr);
     if (*ptr == NUL)		/* nothing found */
     {
 	if (options & FNAME_MESS)
@@ -6413,7 +6480,7 @@ only_one_window(void)
 
     FOR_ALL_WINDOWS(wp)
 	if (wp->w_buffer != NULL
-		&& (!((wp->w_buffer->b_help && !curbuf->b_help)
+		&& (!((bt_help(wp->w_buffer) && !bt_help(curbuf))
 # ifdef FEAT_QUICKFIX
 		    || wp->w_p_pvw
 # endif
@@ -6548,7 +6615,7 @@ restore_snapshot(
 
 /*
  * Check if frames "sn" and "fr" have the same layout, same following frames
- * and same children.
+ * and same children.  And the window pointer is valid.
  */
     static int
 check_snapshot_rec(frame_T *sn, frame_T *fr)
@@ -6559,7 +6626,8 @@ check_snapshot_rec(frame_T *sn, frame_T *fr)
 	    || (sn->fr_next != NULL
 		&& check_snapshot_rec(sn->fr_next, fr->fr_next) == FAIL)
 	    || (sn->fr_child != NULL
-		&& check_snapshot_rec(sn->fr_child, fr->fr_child) == FAIL))
+		&& check_snapshot_rec(sn->fr_child, fr->fr_child) == FAIL)
+	    || (sn->fr_win != NULL && !win_valid(sn->fr_win)))
 	return FAIL;
     return OK;
 }

@@ -68,12 +68,15 @@ typedef struct wininfo_S	wininfo_T;
 typedef struct frame_S		frame_T;
 typedef int			scid_T;		/* script ID */
 typedef struct file_buffer	buf_T;  /* forward declaration */
+typedef struct terminal_S	term_T;
 
-/* Reference to a buffer that stores the value of buf_free_count.
+/*
+ * Reference to a buffer that stores the value of buf_free_count.
  * bufref_valid() only needs to check "buf" when the count differs.
  */
 typedef struct {
     buf_T   *br_buf;
+    int	    br_fnum;
     int	    br_buf_free_count;
 } bufref_T;
 
@@ -265,6 +268,12 @@ typedef struct
 #ifdef FEAT_SIGNS
     char_u	*wo_scl;
 # define w_p_scl w_onebuf_opt.wo_scl	/* 'signcolumn' */
+#endif
+#ifdef FEAT_TERMINAL
+    char_u	*wo_tk;
+#define w_p_tk w_onebuf_opt.wo_tk	/* 'termkey' */
+    char_u	*wo_tms;
+#define w_p_tms w_onebuf_opt.wo_tms	/* 'termsize' */
 #endif
 
 #ifdef FEAT_EVAL
@@ -514,6 +523,12 @@ struct buffheader
     int		bh_index;	/* index for reading */
     int		bh_space;	/* space in bh_curr for appending */
 };
+
+typedef struct
+{
+    buffheader_T sr_redobuff;
+    buffheader_T sr_old_redobuff;
+} save_redo_T;
 
 /*
  * used for completion on the command line
@@ -1133,25 +1148,43 @@ typedef long_u hash_T;		/* Type for hi_hash */
 #  ifdef PROTO
 typedef long		    varnumber_T;
 typedef unsigned long	    uvarnumber_T;
+#define VARNUM_MIN	    LONG_MIN
+#define VARNUM_MAX	    LONG_MAX
+#define UVARNUM_MAX	    ULONG_MAX
 #  else
 typedef __int64		    varnumber_T;
 typedef unsigned __int64    uvarnumber_T;
+#define VARNUM_MIN	    _I64_MIN
+#define VARNUM_MAX	    _I64_MAX
+#define UVARNUM_MAX	    _UI64_MAX
 #  endif
 # elif defined(HAVE_STDINT_H)
 typedef int64_t		    varnumber_T;
 typedef uint64_t	    uvarnumber_T;
+#define VARNUM_MIN	    INT64_MIN
+#define VARNUM_MAX	    INT64_MAX
+#define UVARNUM_MAX	    UINT64_MAX
 # else
 typedef long		    varnumber_T;
 typedef unsigned long	    uvarnumber_T;
+#define VARNUM_MIN	    LONG_MIN
+#define VARNUM_MAX	    LONG_MAX
+#define UVARNUM_MAX	    ULONG_MAX
 # endif
 #else
 /* Use 32-bit Number. */
 # if VIM_SIZEOF_INT <= 3	/* use long if int is smaller than 32 bits */
 typedef long		    varnumber_T;
 typedef unsigned long	    uvarnumber_T;
+#define VARNUM_MIN	    LONG_MIN
+#define VARNUM_MAX	    LONG_MAX
+#define UVARNUM_MAX	    ULONG_MAX
 # else
 typedef int		    varnumber_T;
 typedef unsigned int	    uvarnumber_T;
+#define VARNUM_MIN	    INT_MIN
+#define VARNUM_MAX	    INT_MAX
+#define UVARNUM_MAX	    UINT_MAX
 # endif
 #endif
 
@@ -1163,6 +1196,7 @@ typedef struct partial_S partial_T;
 
 typedef struct jobvar_S job_T;
 typedef struct readq_S readq_T;
+typedef struct writeq_S writeq_T;
 typedef struct jsonq_S jsonq_T;
 typedef struct cbq_S cbq_T;
 typedef struct channel_S channel_T;
@@ -1319,6 +1353,7 @@ typedef struct
     int		uf_varargs;	/* variable nr of arguments */
     int		uf_flags;
     int		uf_calls;	/* nr of active calls */
+    int		uf_cleared;	/* func_clear() was already called */
     garray_T	uf_args;	/* arguments */
     garray_T	uf_lines;	/* function lines */
 #ifdef FEAT_PROFILE
@@ -1421,6 +1456,14 @@ struct partial_S
     dict_T	*pt_dict;	/* dict for "self" */
 };
 
+/* Information returned by get_tty_info(). */
+typedef struct {
+    int backspace;	/* what the Backspace key produces */
+    int enter;		/* what the Enter key produces */
+    int interrupt;	/* interrupt character */
+    int nl_does_cr;	/* TRUE when a NL is expanded to CR-NL on output */
+} ttyinfo_T;
+
 /* Status of a job.  Order matters! */
 typedef enum
 {
@@ -1444,6 +1487,7 @@ struct jobvar_S
     PROCESS_INFORMATION	jv_proc_info;
     HANDLE		jv_job_object;
 #endif
+    char_u	*jv_tty_name;	/* controlling tty, allocated */
     jobstatus_T	jv_status;
     char_u	*jv_stoponexit; /* allocated */
     int		jv_exitval;
@@ -1469,11 +1513,19 @@ struct readq_S
     readq_T	*rq_prev;
 };
 
+struct writeq_S
+{
+    garray_T	wq_ga;
+    writeq_T	*wq_next;
+    writeq_T	*wq_prev;
+};
+
 struct jsonq_S
 {
     typval_T	*jq_value;
     jsonq_T	*jq_next;
     jsonq_T	*jq_prev;
+    int		jq_no_callback; /* TRUE when no callback was found */
 };
 
 struct cbq_S
@@ -1502,18 +1554,20 @@ typedef enum {
     JIO_OUT
 } job_io_T;
 
+#define CH_PART_FD(part)	ch_part[part].ch_fd
+
 /* Ordering matters, it is used in for loops: IN is last, only SOCK/OUT/ERR
  * are polled. */
 typedef enum {
     PART_SOCK = 0,
-#define CH_SOCK_FD	ch_part[PART_SOCK].ch_fd
+#define CH_SOCK_FD	CH_PART_FD(PART_SOCK)
 #ifdef FEAT_JOB_CHANNEL
     PART_OUT,
-# define CH_OUT_FD	ch_part[PART_OUT].ch_fd
+# define CH_OUT_FD	CH_PART_FD(PART_OUT)
     PART_ERR,
-# define CH_ERR_FD	ch_part[PART_ERR].ch_fd
+# define CH_ERR_FD	CH_PART_FD(PART_ERR)
     PART_IN,
-# define CH_IN_FD	ch_part[PART_IN].ch_fd
+# define CH_IN_FD	CH_PART_FD(PART_IN)
 #endif
     PART_COUNT
 } ch_part_T;
@@ -1543,9 +1597,11 @@ typedef struct {
     jsonq_T	ch_json_head;	/* header for circular json read queue */
     int		ch_block_id;	/* ID that channel_read_json_block() is
 				   waiting for */
-    /* When ch_waiting is TRUE use ch_deadline to wait for incomplete message
-     * to be complete. */
-    int		ch_waiting;
+    /* When ch_wait_len is non-zero use ch_deadline to wait for incomplete
+     * message to be complete. The value is the length of the incomplete
+     * message when the deadline was set.  If it gets longer (something was
+     * received) the deadline is reset. */
+    size_t	ch_wait_len;
 #ifdef WIN32
     DWORD	ch_deadline;
 #else
@@ -1553,6 +1609,8 @@ typedef struct {
 #endif
     int		ch_block_write;	/* for testing: 0 when not used, -1 when write
 				 * does not block, 1 simulate blocking */
+    int		ch_nonblocking;	/* write() is non-blocking */
+    writeq_T	ch_writeque;	/* header for write queue */
 
     cbq_T	ch_cb_head;	/* dummy node for per-request callbacks */
     char_u	*ch_callback;	/* call when a msg is not handled */
@@ -1597,6 +1655,8 @@ struct channel_S {
     partial_T	*ch_partial;
     char_u	*ch_close_cb;	/* call when channel is closed */
     partial_T	*ch_close_partial;
+    int		ch_drop_never;
+    int		ch_keep_open;	/* do not close on read error */
 
     job_T	*ch_job;	/* Job that uses this channel; this does not
 				 * count as a reference to avoid a circular
@@ -1615,7 +1675,7 @@ struct channel_S {
 #define JO_CALLBACK	    0x0010	/* channel callback */
 #define JO_OUT_CALLBACK	    0x0020	/* stdout callback */
 #define JO_ERR_CALLBACK	    0x0040	/* stderr callback */
-#define JO_CLOSE_CALLBACK   0x0080	/* close callback */
+#define JO_CLOSE_CALLBACK   0x0080	/* "close_cb" */
 #define JO_WAITTIME	    0x0100	/* only for ch_open() */
 #define JO_TIMEOUT	    0x0200	/* all timeouts */
 #define JO_OUT_TIMEOUT	    0x0400	/* stdout timeouts */
@@ -1643,7 +1703,17 @@ struct channel_S {
 
 #define JO2_OUT_MSG	    0x0001	/* "out_msg" */
 #define JO2_ERR_MSG	    0x0002	/* "err_msg" (JO_OUT_ << 1) */
-#define JO2_ALL		    0x0003
+#define JO2_TERM_NAME	    0x0004	/* "term_name" */
+#define JO2_TERM_FINISH	    0x0008	/* "term_finish" */
+#define JO2_ENV		    0x0010	/* "env" */
+#define JO2_CWD		    0x0020	/* "cwd" */
+#define JO2_TERM_ROWS	    0x0040	/* "term_rows" */
+#define JO2_TERM_COLS	    0x0080	/* "term_cols" */
+#define JO2_VERTICAL	    0x0100	/* "vertical" */
+#define JO2_CURWIN	    0x0200	/* "curwin" */
+#define JO2_HIDDEN	    0x0400	/* "hidden" */
+#define JO2_TERM_OPENCMD    0x0800	/* "term_opencmd" */
+#define JO2_ALL		    0x0FFF
 
 #define JO_MODE_ALL	(JO_MODE + JO_IN_MODE + JO_OUT_MODE + JO_ERR_MODE)
 #define JO_CB_ALL \
@@ -1667,6 +1737,7 @@ typedef struct
     char_u	jo_io_name_buf[4][NUMBUFLEN];
     char_u	*jo_io_name[4];	/* not allocated! */
     int		jo_io_buf[4];
+    int		jo_pty;
     int		jo_modifiable[4];
     int		jo_message[4];
     channel_T	*jo_channel;
@@ -1684,6 +1755,7 @@ typedef struct
     partial_T	*jo_close_partial; /* not referenced! */
     char_u	*jo_exit_cb;	/* not allocated! */
     partial_T	*jo_exit_partial; /* not referenced! */
+    int		jo_drop_never;
     int		jo_waittime;
     int		jo_timeout;
     int		jo_out_timeout;
@@ -1693,6 +1765,21 @@ typedef struct
     int		jo_id;
     char_u	jo_soe_buf[NUMBUFLEN];
     char_u	*jo_stoponexit;
+    dict_T	*jo_env;	/* environment variables */
+    char_u	jo_cwd_buf[NUMBUFLEN];
+    char_u	*jo_cwd;
+
+#ifdef FEAT_TERMINAL
+    /* when non-zero run the job in a terminal window of this size */
+    int		jo_term_rows;
+    int		jo_term_cols;
+    int		jo_vertical;
+    int		jo_curwin;
+    int		jo_hidden;
+    char_u	*jo_term_name;
+    char_u	*jo_term_opencmd;
+    int		jo_term_finish;
+#endif
 } jobopt_T;
 
 
@@ -1765,6 +1852,9 @@ typedef struct {
     hashtab_T	b_keywtab;		/* syntax keywords hash table */
     hashtab_T	b_keywtab_ic;		/* idem, ignore case */
     int		b_syn_error;		/* TRUE when error occurred in HL */
+# ifdef FEAT_RELTIME
+    int		b_syn_slow;		/* TRUE when 'redrawtime' reached */
+# endif
     int		b_syn_ic;		/* ignore case for :syn cmds */
     int		b_syn_spell;		/* SYNSPL_ values */
     garray_T	b_syn_patterns;		/* table for syntax patterns */
@@ -1892,7 +1982,10 @@ struct file_buffer
 
     int		b_changed;	/* 'modified': Set to TRUE if something in the
 				   file has been changed and not written out. */
-    int		b_changedtick;	/* incremented for each change, also for undo */
+    dictitem16_T b_ct_di;	/* holds the b:changedtick value in
+				   b_ct_di.di_tv.vval.v_number;
+				   incremented for each change, also for undo */
+#define CHANGEDTICK(buf) ((buf)->b_ct_di.di_tv.vval.v_number)
 
     int		b_saving;	/* Set to TRUE if we are in the middle of
 				   saving the buffer. */
@@ -2036,9 +2129,9 @@ struct file_buffer
 #ifdef FEAT_MBYTE
     int		b_p_bomb;	/* 'bomb' */
 #endif
-#ifdef FEAT_QUICKFIX
     char_u	*b_p_bh;	/* 'bufhidden' */
     char_u	*b_p_bt;	/* 'buftype' */
+#ifdef FEAT_QUICKFIX
 #define BUF_HAS_QF_ENTRY 1
 #define BUF_HAS_LL_ENTRY 2
     int		b_has_qf_entry;
@@ -2094,6 +2187,7 @@ struct file_buffer
     long_u	b_p_inde_flags;	/* flags for 'indentexpr' */
     char_u	*b_p_indk;	/* 'indentkeys' */
 #endif
+    char_u	*b_p_fp;	/* 'formatprg' */
 #if defined(FEAT_EVAL)
     char_u	*b_p_fex;	/* 'formatexpr' */
     long_u	b_p_fex_flags;	/* flags for 'formatexpr' */
@@ -2104,6 +2198,9 @@ struct file_buffer
     char_u	*b_p_kp;	/* 'keywordprg' */
 #ifdef FEAT_LISP
     int		b_p_lisp;	/* 'lisp' */
+#endif
+#ifdef FEAT_MBYTE
+    char_u	*b_p_menc;	/* 'makeencoding' */
 #endif
     char_u	*b_p_mps;	/* 'matchpairs' */
     int		b_p_ml;		/* 'modeline' */
@@ -2205,6 +2302,7 @@ struct file_buffer
     int		b_ind_hash_comment;
     int		b_ind_cpp_namespace;
     int		b_ind_if_for_while;
+    int		b_ind_cpp_extern_c;
 #endif
 
     linenr_T	b_no_eol_lnum;	/* non-zero lnum when last line of next binary
@@ -2307,6 +2405,11 @@ struct file_buffer
 				 * the file. NULL when not using encryption. */
 #endif
     int		b_mapped_ctrl_c; /* modes where CTRL-C is mapped */
+
+#ifdef FEAT_TERMINAL
+    term_T	*b_term;	/* When not NULL this buffer is for a terminal
+				 * window. */
+#endif
 
 }; /* file_buffer */
 
@@ -3190,6 +3293,7 @@ struct timer_S
     long	tr_interval;	    /* msec */
     char_u	*tr_callback;	    /* allocated */
     partial_T	*tr_partial;
+    int		tr_emsg_count;
 #endif
 };
 
@@ -3225,8 +3329,8 @@ typedef struct
 #endif
 
     int		want_full_screen;
-    int		stdout_isatty;		/* is stdout a terminal? */
     int		not_a_term;		/* no warning for missing term? */
+    int		tty_fail;		/* exit if not a tty */
     char_u	*term;			/* specified terminal name */
 #ifdef FEAT_CRYPT
     int		ask_for_key;		/* -x argument */

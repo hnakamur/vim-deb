@@ -558,13 +558,6 @@ EXTERN long	p_hh;		/* 'helpheight' */
 EXTERN char_u	*p_hlg;		/* 'helplang' */
 #endif
 EXTERN int	p_hid;		/* 'hidden' */
-/* Use P_HID to check if a buffer is to be hidden when it is no longer
- * visible in a window. */
-#ifndef FEAT_QUICKFIX
-# define P_HID(dummy) (p_hid || cmdmod.hide)
-#else
-# define P_HID(buf) (buf_hide(buf))
-#endif
 EXTERN char_u	*p_hl;		/* 'highlight' */
 EXTERN int	p_hls;		/* 'hlsearch' */
 EXTERN long	p_hi;		/* 'history' */
@@ -588,6 +581,9 @@ EXTERN int	p_ic;		/* 'ignorecase' */
 EXTERN char_u	*p_imak;	/* 'imactivatekey' */
 EXTERN char_u	*p_imaf;	/* 'imactivatefunc' */
 EXTERN char_u	*p_imsf;	/* 'imstatusfunc' */
+EXTERN long	p_imst;		/* 'imstyle' */
+# define IM_ON_THE_SPOT		0L
+# define IM_OVER_THE_SPOT	1L
 #endif
 #ifdef USE_IM_CONTROL
 EXTERN int	p_imcmdline;	/* 'imcmdline' */
@@ -630,6 +626,9 @@ EXTERN char_u	*p_luadll;	/* 'luadll' */
 EXTERN int	p_macatsui;	/* 'macatsui' */
 #endif
 EXTERN int	p_magic;	/* 'magic' */
+#ifdef FEAT_MBYTE
+EXTERN char_u	*p_menc;	/* 'makeencoding' */
+#endif
 #ifdef FEAT_QUICKFIX
 EXTERN char_u	*p_mef;		/* 'makeef' */
 EXTERN char_u	*p_mp;		/* 'makeprg' */
@@ -693,6 +692,9 @@ EXTERN char_u	*p_py3dll;	/* 'pythonthreedll' */
 #endif
 #if defined(DYNAMIC_PYTHON)
 EXTERN char_u	*p_pydll;	/* 'pythondll' */
+#endif
+#if defined(FEAT_PYTHON) || defined(FEAT_PYTHON3)
+EXTERN long	p_pyx;		/* 'pyxversion' */
 #endif
 #ifdef FEAT_RELTIME
 EXTERN long	p_rdt;		/* 'redrawtime' */
@@ -914,6 +916,7 @@ EXTERN char_u	*p_fcs;		/* 'fillchar' */
 #endif
 #ifdef FEAT_VIMINFO
 EXTERN char_u	*p_viminfo;	/* 'viminfo' */
+EXTERN char_u	*p_viminfofile;	/* 'viminfofile' */
 #endif
 #ifdef FEAT_SESSION
 EXTERN char_u	*p_vdir;	/* 'viewdir' */
@@ -966,6 +969,9 @@ EXTERN long	p_wmh;		/* 'winminheight' */
 EXTERN long	p_wmw;		/* 'winminwidth' */
 EXTERN long	p_wiw;		/* 'winwidth' */
 #endif
+#if defined(WIN3264) && defined(FEAT_TERMINAL)
+EXTERN char_u	*p_winptydll;	/* 'winptydll' */
+#endif
 EXTERN int	p_ws;		/* 'wrapscan' */
 EXTERN int	p_write;	/* 'write' */
 EXTERN int	p_wa;		/* 'writeany' */
@@ -981,12 +987,10 @@ enum
 {
     BV_AI = 0
     , BV_AR
-#ifdef FEAT_QUICKFIX
     , BV_BH
-#endif
     , BV_BKC
-#ifdef FEAT_QUICKFIX
     , BV_BT
+#ifdef FEAT_QUICKFIX
     , BV_EFM
     , BV_GP
     , BV_MP
@@ -1029,6 +1033,7 @@ enum
     , BV_EP
     , BV_ET
     , BV_FENC
+    , BV_FP
 #ifdef FEAT_EVAL
     , BV_BEXPR
     , BV_FEX
@@ -1060,6 +1065,9 @@ enum
 #ifdef FEAT_LISP
     , BV_LISP
     , BV_LW
+#endif
+#ifdef FEAT_MBYTE
+    , BV_MENC
 #endif
     , BV_MA
     , BV_ML
@@ -1119,6 +1127,10 @@ enum
 #ifdef FEAT_CONCEAL
     , WV_COCU
     , WV_COLE
+#endif
+#ifdef FEAT_TERMINAL
+    , WV_TK
+    , WV_TMS
 #endif
 #ifdef FEAT_CURSORBIND
     , WV_CRBIND

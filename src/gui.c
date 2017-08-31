@@ -630,7 +630,7 @@ gui_init(void)
      * where Vim was started. */
     emsg_on_display = FALSE;
     msg_scrolled = 0;
-    clear_sb_text();
+    clear_sb_text(TRUE);
     need_wait_return = FALSE;
     msg_didany = FALSE;
 
@@ -1051,8 +1051,12 @@ gui_update_cursor(
     int		cur_width = 0;
     int		cur_height = 0;
     int		old_hl_mask;
-    int		idx;
+    cursorentry_T *shape;
     int		id;
+#ifdef FEAT_TERMINAL
+    guicolor_T	shape_fg = INVALCOLOR;
+    guicolor_T	shape_bg = INVALCOLOR;
+#endif
     guicolor_T	cfg, cbg, cc;	/* cursor fore-/background color */
     int		cattr;		/* cursor attributes */
     int		attr;
@@ -1094,20 +1098,35 @@ gui_update_cursor(
 
 	/*
 	 * How the cursor is drawn depends on the current mode.
+	 * When in a terminal window use the shape/color specified there.
 	 */
-	idx = get_shape_idx(FALSE);
-	if (State & LANGMAP)
-	    id = shape_table[idx].id_lm;
+#ifdef FEAT_TERMINAL
+	if (use_terminal_cursor())
+	    shape = term_get_cursor_shape(&shape_fg, &shape_bg);
 	else
-	    id = shape_table[idx].id;
+#endif
+	    shape = &shape_table[get_shape_idx(FALSE)];
+	if (State & LANGMAP)
+	    id = shape->id_lm;
+	else
+	    id = shape->id;
 
 	/* get the colors and attributes for the cursor.  Default is inverted */
 	cfg = INVALCOLOR;
 	cbg = INVALCOLOR;
 	cattr = HL_INVERSE;
-	gui_mch_set_blinking(shape_table[idx].blinkwait,
-			     shape_table[idx].blinkon,
-			     shape_table[idx].blinkoff);
+	gui_mch_set_blinking(shape->blinkwait,
+			     shape->blinkon,
+			     shape->blinkoff);
+#ifdef FEAT_TERMINAL
+	if (shape_bg != INVALCOLOR)
+	{
+	    cattr = 0;
+	    cfg = shape_fg;
+	    cbg = shape_bg;
+	}
+	else
+#endif
 	if (id > 0)
 	{
 	    cattr = syn_id2colors(id, &cfg, &cbg);
@@ -1202,7 +1221,7 @@ gui_update_cursor(
 	}
 
 	old_hl_mask = gui.highlight_mask;
-	if (shape_table[idx].shape == SHAPE_BLOCK
+	if (shape->shape == SHAPE_BLOCK
 #ifdef FEAT_HANGULIN
 		|| composing_hangul
 #endif
@@ -1242,16 +1261,14 @@ gui_update_cursor(
 	     * First draw the partial cursor, then overwrite with the text
 	     * character, using a transparent background.
 	     */
-	    if (shape_table[idx].shape == SHAPE_VER)
+	    if (shape->shape == SHAPE_VER)
 	    {
 		cur_height = gui.char_height;
-		cur_width = (gui.char_width * shape_table[idx].percentage
-								  + 99) / 100;
+		cur_width = (gui.char_width * shape->percentage + 99) / 100;
 	    }
 	    else
 	    {
-		cur_height = (gui.char_height * shape_table[idx].percentage
-								  + 99) / 100;
+		cur_height = (gui.char_height * shape->percentage + 99) / 100;
 		cur_width = gui.char_width;
 	    }
 #ifdef FEAT_MBYTE
@@ -1259,7 +1276,7 @@ gui_update_cursor(
 				    LineOffset[gui.row] + screen_Columns) > 1)
 	    {
 		/* Double wide character. */
-		if (shape_table[idx].shape != SHAPE_VER)
+		if (shape->shape != SHAPE_VER)
 		    cur_width += gui.char_width;
 # ifdef FEAT_RIGHTLEFT
 		if (CURSOR_BAR_RIGHT)
@@ -1459,6 +1476,8 @@ gui_resize_shell(int pixel_width, int pixel_height)
     }
 
 again:
+    new_pixel_width = 0;
+    new_pixel_height = 0;
     busy = TRUE;
 
     /* Flush pending output before redrawing */
@@ -1468,8 +1487,8 @@ again:
     gui.num_rows = (pixel_height - gui_get_base_height()) / gui.char_height;
 
     gui_position_components(pixel_width);
-
     gui_reset_scroll_region();
+
     /*
      * At the "more" and ":confirm" prompt there is no redraw, put the cursor
      * at the last line here (why does it have to be one row too low?).
@@ -1491,17 +1510,22 @@ again:
 
     busy = FALSE;
 
-    /*
-     * We could have been called again while redrawing the screen.
-     * Need to do it all again with the latest size then.
-     */
+    /* We may have been called again while redrawing the screen.
+     * Need to do it all again with the latest size then.  But only if the size
+     * actually changed. */
     if (new_pixel_height)
     {
-	pixel_width = new_pixel_width;
-	pixel_height = new_pixel_height;
-	new_pixel_width = 0;
-	new_pixel_height = 0;
-	goto again;
+	if (pixel_width == new_pixel_width && pixel_height == new_pixel_height)
+	{
+	    new_pixel_width = 0;
+	    new_pixel_height = 0;
+	}
+	else
+	{
+	    pixel_width = new_pixel_width;
+	    pixel_height = new_pixel_height;
+	    goto again;
+	}
     }
 }
 
@@ -1511,18 +1535,10 @@ again:
     void
 gui_may_resize_shell(void)
 {
-    int		h, w;
-
     if (new_pixel_height)
-    {
 	/* careful: gui_resize_shell() may postpone the resize again if we
 	 * were called indirectly by it */
-	w = new_pixel_width;
-	h = new_pixel_height;
-	new_pixel_width = 0;
-	new_pixel_height = 0;
-	gui_resize_shell(w, h);
-    }
+	gui_resize_shell(new_pixel_width, new_pixel_height);
 }
 
     int
@@ -1729,7 +1745,7 @@ gui_clear_block(
     void
 gui_update_cursor_later(void)
 {
- OUT_STR(IF_EB("\033|s", ESC_STR "|s"));
+    OUT_STR(IF_EB("\033|s", ESC_STR "|s"));
 }
 
     void
@@ -2850,6 +2866,10 @@ gui_insert_lines(int row, int count)
     }
 }
 
+/*
+ * Returns OK if a character was found to be available within the given time,
+ * or FAIL otherwise.
+ */
     static int
 gui_wait_for_chars_or_timer(long wtime)
 {
@@ -2870,16 +2890,16 @@ gui_wait_for_chars_or_timer(long wtime)
 	if (typebuf.tb_change_cnt != tb_change_cnt)
 	{
 	    /* timer may have used feedkeys() */
-	    return FALSE;
+	    return FAIL;
 	}
 	if (due_time <= 0 || (wtime > 0 && due_time > remaining))
 	    due_time = remaining;
 	if (gui_mch_wait_for_chars(due_time))
-	    return TRUE;
+	    return OK;
 	if (wtime > 0)
 	    remaining -= due_time;
     }
-    return FALSE;
+    return FAIL;
 #else
     return gui_mch_wait_for_chars(wtime);
 #endif
@@ -2897,6 +2917,7 @@ gui_wait_for_chars_or_timer(long wtime)
 gui_wait_for_chars(long wtime)
 {
     int	    retval;
+    int	    tb_change_cnt = typebuf.tb_change_cnt;
 
 #ifdef FEAT_MENU
     /*
@@ -2954,7 +2975,7 @@ gui_wait_for_chars(long wtime)
     }
 #endif
 
-    if (retval == FAIL)
+    if (retval == FAIL && typebuf.tb_change_cnt == tb_change_cnt)
     {
 	/* Blocking wait. */
 	before_blocking();
@@ -4477,7 +4498,7 @@ gui_do_scroll(void)
 	pum_redraw();
 #endif
 
-    return (wp == curwin && !equalpos(curwin->w_cursor, old_cursor));
+    return (wp == curwin && !EQUAL_POS(curwin->w_cursor, old_cursor));
 }
 
 
@@ -4501,7 +4522,7 @@ scroll_line_len(linenr_T lnum)
 	for (;;)
 	{
 	    w = chartabsize(p, col);
-	    mb_ptr_adv(p);
+	    MB_PTR_ADV(p);
 	    if (*p == NUL)		/* don't count the last character */
 		break;
 	    col += w;
@@ -4912,7 +4933,7 @@ gui_mouse_correct(void)
 }
 
 /*
- * Find window where the mouse pointer "y" coordinate is in.
+ * Find window where the mouse pointer "x" / "y" coordinate is in.
  */
     static win_T *
 xy2win(int x UNUSED, int y UNUSED)
@@ -4927,6 +4948,8 @@ xy2win(int x UNUSED, int y UNUSED)
     if (row < 0 || col < 0)		/* before first window */
 	return NULL;
     wp = mouse_find_win(&row, &col);
+    if (wp == NULL)
+	return NULL;
 # ifdef FEAT_MOUSESHAPE
     if (State == HITRETURN || State == ASKMORE)
     {
@@ -4968,7 +4991,7 @@ ex_gui(exarg_T *eap)
      */
     if (arg[0] == '-'
 	    && (arg[1] == 'f' || arg[1] == 'b')
-	    && (arg[2] == NUL || vim_iswhite(arg[2])))
+	    && (arg[2] == NUL || VIM_ISWHITE(arg[2])))
     {
 	gui.dofork = (arg[1] == 'b');
 	eap->arg = skipwhite(eap->arg + 2);
@@ -5119,7 +5142,7 @@ gui_update_screen(void)
 		curwin->w_p_cole > 0
 # endif
 		)
-		     && !equalpos(last_cursormoved, curwin->w_cursor))
+		     && !EQUAL_POS(last_cursormoved, curwin->w_cursor))
     {
 # ifdef FEAT_AUTOCMD
 	if (has_cursormoved())
@@ -5357,7 +5380,7 @@ gui_do_findrepl(
 	    searchflags += SEARCH_START;
 	i = msg_scroll;
 	(void)do_search(NULL, down ? '/' : '?', ga.ga_data, 1L,
-							   searchflags, NULL);
+						      searchflags, NULL, NULL);
 	msg_scroll = i;	    /* don't let an error message set msg_scroll */
     }
 
