@@ -886,7 +886,7 @@ mb_get_class_buf(char_u *p, buf_T *buf)
 {
     if (MB_BYTE2LEN(p[0]) == 1)
     {
-	if (p[0] == NUL || vim_iswhite(p[0]))
+	if (p[0] == NUL || VIM_ISWHITE(p[0]))
 	    return 0;
 	if (vim_iswordc_buf(p[0], buf))
 	    return 2;
@@ -895,7 +895,7 @@ mb_get_class_buf(char_u *p, buf_T *buf)
     if (enc_dbcs != 0 && p[0] != NUL && p[1] != NUL)
 	return dbcs_class(p[0], p[1]);
     if (enc_utf8)
-	return utf_class(utf_ptr2char(p));
+	return utf_class_buf(utf_ptr2char(p), buf);
     return 0;
 }
 
@@ -1395,6 +1395,17 @@ static struct interval ambiguous[] =
     {0x100000, 0x10fffd}
 };
 
+#if defined(FEAT_TERMINAL) || defined(PROTO)
+/*
+ * utf_char2cells() with different argument type for libvterm.
+ */
+    int
+utf_uint2cells(UINT32_T c)
+{
+    return utf_char2cells((int)c);
+}
+#endif
+
 /*
  * For UTF-8 character "c" return 2 for a double-width character, 1 for others.
  * Returns 4 or 6 for an unprintable character.
@@ -1451,7 +1462,7 @@ utf_char2cells(int c)
 	{0x3000, 0x303e},
 	{0x3041, 0x3096},
 	{0x3099, 0x30ff},
-	{0x3105, 0x312d},
+	{0x3105, 0x312e},
 	{0x3131, 0x318e},
 	{0x3190, 0x31ba},
 	{0x31c0, 0x31e3},
@@ -1470,10 +1481,11 @@ utf_char2cells(int c)
 	{0xfe68, 0xfe6b},
 	{0xff01, 0xff60},
 	{0xffe0, 0xffe6},
-	{0x16fe0, 0x16fe0},
+	{0x16fe0, 0x16fe1},
 	{0x17000, 0x187ec},
 	{0x18800, 0x18af2},
-	{0x1b000, 0x1b001},
+	{0x1b000, 0x1b11e},
+	{0x1b170, 0x1b2fb},
 	{0x1f004, 0x1f004},
 	{0x1f0cf, 0x1f0cf},
 	{0x1f18e, 0x1f18e},
@@ -1482,6 +1494,7 @@ utf_char2cells(int c)
 	{0x1f210, 0x1f23b},
 	{0x1f240, 0x1f248},
 	{0x1f250, 0x1f251},
+	{0x1f260, 0x1f265},
 	{0x1f300, 0x1f320},
 	{0x1f32d, 0x1f335},
 	{0x1f337, 0x1f37c},
@@ -1504,15 +1517,13 @@ utf_char2cells(int c)
 	{0x1f6cc, 0x1f6cc},
 	{0x1f6d0, 0x1f6d2},
 	{0x1f6eb, 0x1f6ec},
-	{0x1f6f4, 0x1f6f6},
-	{0x1f910, 0x1f91e},
-	{0x1f920, 0x1f927},
-	{0x1f930, 0x1f930},
-	{0x1f933, 0x1f93e},
-	{0x1f940, 0x1f94b},
-	{0x1f950, 0x1f95e},
-	{0x1f980, 0x1f991},
+	{0x1f6f4, 0x1f6f8},
+	{0x1f910, 0x1f93e},
+	{0x1f940, 0x1f94c},
+	{0x1f950, 0x1f96b},
+	{0x1f980, 0x1f997},
 	{0x1f9c0, 0x1f9c0},
+	{0x1f9d0, 0x1f9e6},
 	{0x20000, 0x2fffd},
 	{0x30000, 0x3fffd}
     };
@@ -1522,25 +1533,45 @@ utf_char2cells(int c)
      * based on http://unicode.org/emoji/charts/emoji-list.html */
     static struct interval emoji_width[] =
     {
-	{0x1f004, 0x1f004},
-	{0x1f0cf, 0x1f0cf},
 	{0x1f1e6, 0x1f1ff},
-	{0x1f300, 0x1f320},
-	{0x1f330, 0x1f335},
-	{0x1f337, 0x1f37c},
-	{0x1f380, 0x1f393},
-	{0x1f3a0, 0x1f3c4},
-	{0x1f3c6, 0x1f3ca},
-	{0x1f3e0, 0x1f3f0},
-	{0x1f400, 0x1f43e},
-	{0x1f440, 0x1f440},
-	{0x1f442, 0x1f4f7},
-	{0x1f4f9, 0x1f4fc},
-	{0x1f500, 0x1f53d},
-	{0x1f550, 0x1f567},
-	{0x1f5fb, 0x1f640},
-	{0x1f645, 0x1f64f},
-	{0x1f680, 0x1f6c5}
+	{0x1f321, 0x1f321},
+	{0x1f324, 0x1f32c},
+	{0x1f336, 0x1f336},
+	{0x1f37d, 0x1f37d},
+	{0x1f396, 0x1f397},
+	{0x1f399, 0x1f39b},
+	{0x1f39e, 0x1f39f},
+	{0x1f3cb, 0x1f3ce},
+	{0x1f3d4, 0x1f3df},
+	{0x1f3f3, 0x1f3f5},
+	{0x1f3f7, 0x1f3f7},
+	{0x1f43f, 0x1f43f},
+	{0x1f441, 0x1f441},
+	{0x1f4fd, 0x1f4fd},
+	{0x1f549, 0x1f54a},
+	{0x1f56f, 0x1f570},
+	{0x1f573, 0x1f579},
+	{0x1f587, 0x1f587},
+	{0x1f58a, 0x1f58d},
+	{0x1f590, 0x1f590},
+	{0x1f5a5, 0x1f5a5},
+	{0x1f5a8, 0x1f5a8},
+	{0x1f5b1, 0x1f5b2},
+	{0x1f5bc, 0x1f5bc},
+	{0x1f5c2, 0x1f5c4},
+	{0x1f5d1, 0x1f5d3},
+	{0x1f5dc, 0x1f5de},
+	{0x1f5e1, 0x1f5e1},
+	{0x1f5e3, 0x1f5e3},
+	{0x1f5e8, 0x1f5e8},
+	{0x1f5ef, 0x1f5ef},
+	{0x1f5f3, 0x1f5f3},
+	{0x1f5fa, 0x1f5fa},
+	{0x1f6cb, 0x1f6cf},
+	{0x1f6e0, 0x1f6e5},
+	{0x1f6e9, 0x1f6e9},
+	{0x1f6f0, 0x1f6f0},
+	{0x1f6f3, 0x1f6f3}
     };
 
     if (c >= 0x100)
@@ -2276,6 +2307,17 @@ utf_char2bytes(int c, char_u *buf)
     return 6;
 }
 
+#if defined(FEAT_TERMINAL) || defined(PROTO)
+/*
+ * utf_iscomposing() with different argument type for libvterm.
+ */
+    int
+utf_iscomposing_uint(UINT32_T c)
+{
+    return utf_iscomposing((int)c);
+}
+#endif
+
 /*
  * Return TRUE if "c" is a composing UTF-8 character.  This means it will be
  * drawn on top of the preceding character.
@@ -2338,6 +2380,7 @@ utf_iscomposing(int c)
 	{0x0ac7, 0x0ac9},
 	{0x0acb, 0x0acd},
 	{0x0ae2, 0x0ae3},
+	{0x0afa, 0x0aff},
 	{0x0b01, 0x0b03},
 	{0x0b3c, 0x0b3c},
 	{0x0b3e, 0x0b44},
@@ -2363,7 +2406,8 @@ utf_iscomposing(int c)
 	{0x0cca, 0x0ccd},
 	{0x0cd5, 0x0cd6},
 	{0x0ce2, 0x0ce3},
-	{0x0d01, 0x0d03},
+	{0x0d00, 0x0d03},
+	{0x0d3b, 0x0d3c},
 	{0x0d3e, 0x0d44},
 	{0x0d46, 0x0d48},
 	{0x0d4a, 0x0d4d},
@@ -2429,8 +2473,8 @@ utf_iscomposing(int c)
 	{0x1cd4, 0x1ce8},
 	{0x1ced, 0x1ced},
 	{0x1cf2, 0x1cf4},
-	{0x1cf8, 0x1cf9},
-	{0x1dc0, 0x1df5},
+	{0x1cf7, 0x1cf9},
+	{0x1dc0, 0x1df9},
 	{0x1dfb, 0x1dff},
 	{0x20d0, 0x20f0},
 	{0x2cef, 0x2cf1},
@@ -2509,10 +2553,21 @@ utf_iscomposing(int c)
 	{0x11630, 0x11640},
 	{0x116ab, 0x116b7},
 	{0x1171d, 0x1172b},
+	{0x11a01, 0x11a0a},
+	{0x11a33, 0x11a39},
+	{0x11a3b, 0x11a3e},
+	{0x11a47, 0x11a47},
+	{0x11a51, 0x11a5b},
+	{0x11a8a, 0x11a99},
 	{0x11c2f, 0x11c36},
 	{0x11c38, 0x11c3f},
 	{0x11c92, 0x11ca7},
 	{0x11ca9, 0x11cb6},
+	{0x11d31, 0x11d36},
+	{0x11d3a, 0x11d3a},
+	{0x11d3c, 0x11d3d},
+	{0x11d3f, 0x11d45},
+	{0x11d47, 0x11d47},
 	{0x16af0, 0x16af4},
 	{0x16b30, 0x16b36},
 	{0x16f51, 0x16f7e},
@@ -2583,6 +2638,7 @@ static struct interval emoji_all[] =
     {0x2328, 0x2328},
     {0x23cf, 0x23cf},
     {0x23e9, 0x23f3},
+    {0x23f8, 0x23fa},
     {0x24c2, 0x24c2},
     {0x25aa, 0x25ab},
     {0x25b6, 0x25b6},
@@ -2600,6 +2656,8 @@ static struct interval emoji_all[] =
     {0x262a, 0x262a},
     {0x262e, 0x262f},
     {0x2638, 0x263a},
+    {0x2640, 0x2640},
+    {0x2642, 0x2642},
     {0x2648, 0x2653},
     {0x2660, 0x2660},
     {0x2663, 0x2663},
@@ -2607,8 +2665,7 @@ static struct interval emoji_all[] =
     {0x2668, 0x2668},
     {0x267b, 0x267b},
     {0x267f, 0x267f},
-    {0x2692, 0x2694},
-    {0x2696, 0x2697},
+    {0x2692, 0x2697},
     {0x2699, 0x2699},
     {0x269b, 0x269c},
     {0x26a0, 0x26a1},
@@ -2667,22 +2724,50 @@ static struct interval emoji_all[] =
     {0x1f22f, 0x1f22f},
     {0x1f232, 0x1f23a},
     {0x1f250, 0x1f251},
-    {0x1f300, 0x1f320},
-    {0x1f330, 0x1f335},
-    {0x1f337, 0x1f37c},
-    {0x1f380, 0x1f393},
-    {0x1f3a0, 0x1f3c4},
-    {0x1f3c6, 0x1f3ca},
-    {0x1f3e0, 0x1f3f0},
-    {0x1f400, 0x1f43e},
-    {0x1f440, 0x1f440},
-    {0x1f442, 0x1f4f7},
-    {0x1f4f9, 0x1f4fc},
-    {0x1f500, 0x1f53d},
+    {0x1f300, 0x1f321},
+    {0x1f324, 0x1f393},
+    {0x1f396, 0x1f397},
+    {0x1f399, 0x1f39b},
+    {0x1f39e, 0x1f3f0},
+    {0x1f3f3, 0x1f3f5},
+    {0x1f3f7, 0x1f4fd},
+    {0x1f4ff, 0x1f53d},
+    {0x1f549, 0x1f54e},
     {0x1f550, 0x1f567},
-    {0x1f5fb, 0x1f640},
-    {0x1f645, 0x1f64f},
-    {0x1f680, 0x1f6c5}
+    {0x1f56f, 0x1f570},
+    {0x1f573, 0x1f57a},
+    {0x1f587, 0x1f587},
+    {0x1f58a, 0x1f58d},
+    {0x1f590, 0x1f590},
+    {0x1f595, 0x1f596},
+    {0x1f5a4, 0x1f5a5},
+    {0x1f5a8, 0x1f5a8},
+    {0x1f5b1, 0x1f5b2},
+    {0x1f5bc, 0x1f5bc},
+    {0x1f5c2, 0x1f5c4},
+    {0x1f5d1, 0x1f5d3},
+    {0x1f5dc, 0x1f5de},
+    {0x1f5e1, 0x1f5e1},
+    {0x1f5e3, 0x1f5e3},
+    {0x1f5e8, 0x1f5e8},
+    {0x1f5ef, 0x1f5ef},
+    {0x1f5f3, 0x1f5f3},
+    {0x1f5fa, 0x1f64f},
+    {0x1f680, 0x1f6c5},
+    {0x1f6cb, 0x1f6d2},
+    {0x1f6e0, 0x1f6e5},
+    {0x1f6e9, 0x1f6e9},
+    {0x1f6eb, 0x1f6ec},
+    {0x1f6f0, 0x1f6f0},
+    {0x1f6f3, 0x1f6f8},
+    {0x1f910, 0x1f93a},
+    {0x1f93c, 0x1f93e},
+    {0x1f940, 0x1f945},
+    {0x1f947, 0x1f94c},
+    {0x1f950, 0x1f96b},
+    {0x1f980, 0x1f997},
+    {0x1f9c0, 0x1f9c0},
+    {0x1f9d0, 0x1f9e6}
 };
 
 /*
@@ -2693,6 +2778,12 @@ static struct interval emoji_all[] =
  */
     int
 utf_class(int c)
+{
+    return utf_class_buf(c, curbuf);
+}
+
+    int
+utf_class_buf(int c, buf_T *buf)
 {
     /* sorted list of non-overlapping intervals */
     static struct clinterval
@@ -2780,7 +2871,7 @@ utf_class(int c)
     {
 	if (c == ' ' || c == '\t' || c == NUL || c == 0xa0)
 	    return 0;	    /* blank */
-	if (vim_iswordc(c))
+	if (vim_iswordc_buf(c, buf))
 	    return 2;	    /* word character */
 	return 1;	    /* punctuation */
     }
@@ -4041,7 +4132,7 @@ mb_prevptr(
     char_u *p)
 {
     if (p > line)
-	mb_ptr_back(line, p);
+	MB_PTR_BACK(line, p);
     return p;
 }
 
@@ -4584,47 +4675,6 @@ static HINSTANCE hMsvcrtDLL = 0;
 #   endif
 
 /*
- * Get the address of 'funcname' which is imported by 'hInst' DLL.
- */
-    static void *
-get_iconv_import_func(HINSTANCE hInst, const char *funcname)
-{
-    PBYTE			pImage = (PBYTE)hInst;
-    PIMAGE_DOS_HEADER		pDOS = (PIMAGE_DOS_HEADER)hInst;
-    PIMAGE_NT_HEADERS		pPE;
-    PIMAGE_IMPORT_DESCRIPTOR	pImpDesc;
-    PIMAGE_THUNK_DATA		pIAT;	    /* Import Address Table */
-    PIMAGE_THUNK_DATA		pINT;	    /* Import Name Table */
-    PIMAGE_IMPORT_BY_NAME	pImpName;
-
-    if (pDOS->e_magic != IMAGE_DOS_SIGNATURE)
-	return NULL;
-    pPE = (PIMAGE_NT_HEADERS)(pImage + pDOS->e_lfanew);
-    if (pPE->Signature != IMAGE_NT_SIGNATURE)
-	return NULL;
-    pImpDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pImage
-	    + pPE->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
-							    .VirtualAddress);
-    for (; pImpDesc->FirstThunk; ++pImpDesc)
-    {
-	if (!pImpDesc->OriginalFirstThunk)
-	    continue;
-	pIAT = (PIMAGE_THUNK_DATA)(pImage + pImpDesc->FirstThunk);
-	pINT = (PIMAGE_THUNK_DATA)(pImage + pImpDesc->OriginalFirstThunk);
-	for (; pIAT->u1.Function; ++pIAT, ++pINT)
-	{
-	    if (IMAGE_SNAP_BY_ORDINAL(pINT->u1.Ordinal))
-		continue;
-	    pImpName = (PIMAGE_IMPORT_BY_NAME)(pImage
-					+ (UINT_PTR)(pINT->u1.AddressOfData));
-	    if (strcmp((char *)pImpName->Name, funcname) == 0)
-		return (void *)pIAT->u1.Function;
-	}
-    }
-    return NULL;
-}
-
-/*
  * Try opening the iconv.dll and return TRUE if iconv() can be used.
  */
     int
@@ -4671,7 +4721,7 @@ iconv_enabled(int verbose)
     iconv_open	= (void *)GetProcAddress(hIconvDLL, "libiconv_open");
     iconv_close	= (void *)GetProcAddress(hIconvDLL, "libiconv_close");
     iconvctl	= (void *)GetProcAddress(hIconvDLL, "libiconvctl");
-    iconv_errno	= get_iconv_import_func(hIconvDLL, "_errno");
+    iconv_errno	= get_dll_import_func(hIconvDLL, "_errno");
     if (iconv_errno == NULL)
 	iconv_errno = (void *)GetProcAddress(hMsvcrtDLL, "_errno");
     if (iconv == NULL || iconv_open == NULL || iconv_close == NULL
@@ -4738,6 +4788,11 @@ static unsigned long im_commit_handler_id  = 0;
 static unsigned int  im_activatekey_keyval = GDK_VoidSymbol;
 static unsigned int  im_activatekey_state  = 0;
 
+static GtkWidget *preedit_window = NULL;
+static GtkWidget *preedit_label = NULL;
+
+static void im_preedit_window_set_position(void);
+
     void
 im_set_active(int active)
 {
@@ -4775,6 +4830,9 @@ im_set_position(int row, int col)
 	area.height = gui.char_height;
 
 	gtk_im_context_set_cursor_location(xic, &area);
+
+	if (p_imst == IM_OVER_THE_SPOT)
+	    im_preedit_window_set_position();
     }
 }
 
@@ -4805,11 +4863,106 @@ im_add_to_input(char_u *str, int len)
 	gui_mch_mousehide(TRUE);
 }
 
+     static void
+im_preedit_window_set_position(void)
+{
+    int x, y, w, h, sw, sh;
+
+    if (preedit_window == NULL)
+	return;
+
+    sw = gdk_screen_get_width(gtk_widget_get_screen(preedit_window));
+    sh = gdk_screen_get_height(gtk_widget_get_screen(preedit_window));
+#if GTK_CHECK_VERSION(3,0,0)
+    gdk_window_get_origin(gtk_widget_get_window(gui.drawarea), &x, &y);
+#else
+    gdk_window_get_origin(gui.drawarea->window, &x, &y);
+#endif
+    gtk_window_get_size(GTK_WINDOW(preedit_window), &w, &h);
+    x = x + FILL_X(gui.col);
+    y = y + FILL_Y(gui.row);
+    if (x + w > sw)
+	x = sw - w;
+    if (y + h > sh)
+	y = sh - h;
+    gtk_window_move(GTK_WINDOW(preedit_window), x, y);
+}
+
+    static void
+im_preedit_window_open()
+{
+    char *preedit_string;
+    char buf[8];
+    PangoAttrList *attr_list;
+    PangoLayout *layout;
+    GdkColor color;
+    gint w, h;
+
+    if (preedit_window == NULL)
+    {
+	preedit_window = gtk_window_new(GTK_WINDOW_POPUP);
+	preedit_label = gtk_label_new("");
+	gtk_container_add(GTK_CONTAINER(preedit_window), preedit_label);
+    }
+
+    gtk_widget_modify_font(preedit_label, gui.norm_font);
+
+    vim_snprintf(buf, sizeof(buf), "#%06X", gui.norm_pixel);
+    gdk_color_parse(buf, &color);
+    gtk_widget_modify_fg(preedit_label, GTK_STATE_NORMAL, &color);
+
+    vim_snprintf(buf, sizeof(buf), "#%06X", gui.back_pixel);
+    gdk_color_parse(buf, &color);
+    gtk_widget_modify_bg(preedit_window, GTK_STATE_NORMAL, &color);
+
+    gtk_im_context_get_preedit_string(xic, &preedit_string, &attr_list, NULL);
+
+    if (preedit_string[0] != NUL)
+    {
+	gtk_label_set_text(GTK_LABEL(preedit_label), preedit_string);
+	gtk_label_set_attributes(GTK_LABEL(preedit_label), attr_list);
+
+	layout = gtk_label_get_layout(GTK_LABEL(preedit_label));
+	pango_layout_get_pixel_size(layout, &w, &h);
+	h = MAX(h, gui.char_height);
+	gtk_window_resize(GTK_WINDOW(preedit_window), w, h);
+
+	gtk_widget_show_all(preedit_window);
+
+	im_preedit_window_set_position();
+    }
+
+    g_free(preedit_string);
+    pango_attr_list_unref(attr_list);
+}
+
+    static void
+im_preedit_window_close()
+{
+    if (preedit_window != NULL)
+	gtk_widget_hide(preedit_window);
+}
+
+    static void
+im_show_preedit()
+{
+    im_preedit_window_open();
+
+    if (p_mh) /* blank out the pointer if necessary */
+	gui_mch_mousehide(TRUE);
+}
+
     static void
 im_delete_preedit(void)
 {
     char_u bskey[]  = {CSI, 'k', 'b'};
     char_u delkey[] = {CSI, 'k', 'D'};
+
+    if (p_imst == IM_OVER_THE_SPOT)
+    {
+	im_preedit_window_close();
+	return;
+    }
 
     if (State & NORMAL)
     {
@@ -4883,39 +5036,42 @@ im_commit_cb(GtkIMContext *context UNUSED,
     xim_log("im_commit_cb(): %s\n", str);
 #endif
 
-    /* The imhangul module doesn't reset the preedit string before
-     * committing.  Call im_delete_preedit() to work around that. */
-    im_delete_preedit();
-
-    /* Indicate that preediting has finished. */
-    if (preedit_start_col == MAXCOL)
+    if (p_imst == IM_ON_THE_SPOT)
     {
-	init_preedit_start_col();
-	commit_with_preedit = FALSE;
+	/* The imhangul module doesn't reset the preedit string before
+	 * committing.  Call im_delete_preedit() to work around that. */
+	im_delete_preedit();
+
+	/* Indicate that preediting has finished. */
+	if (preedit_start_col == MAXCOL)
+	{
+	    init_preedit_start_col();
+	    commit_with_preedit = FALSE;
+	}
+
+	/* The thing which setting "preedit_start_col" to MAXCOL means that
+	 * "preedit_start_col" will be set forcedly when calling
+	 * preedit_changed_cb() next time.
+	 * "preedit_start_col" should not reset with MAXCOL on this part. Vim
+	 * is simulating the preediting by using add_to_input_str(). when
+	 * preedit begin immediately before committed, the typebuf is not
+	 * flushed to screen, then it can't get correct "preedit_start_col".
+	 * Thus, it should calculate the cells by adding cells of the committed
+	 * string. */
+	if (input_conv.vc_type != CONV_NONE)
+	{
+	    im_str = string_convert(&input_conv, (char_u *)str, &len);
+	    g_return_if_fail(im_str != NULL);
+	}
+	else
+	    im_str = (char_u *)str;
+
+	clen = mb_string2cells(im_str, len);
+
+	if (input_conv.vc_type != CONV_NONE)
+	    vim_free(im_str);
+	preedit_start_col += clen;
     }
-
-    /* The thing which setting "preedit_start_col" to MAXCOL means that
-     * "preedit_start_col" will be set forcedly when calling
-     * preedit_changed_cb() next time.
-     * "preedit_start_col" should not reset with MAXCOL on this part. Vim
-     * is simulating the preediting by using add_to_input_str(). when
-     * preedit begin immediately before committed, the typebuf is not
-     * flushed to screen, then it can't get correct "preedit_start_col".
-     * Thus, it should calculate the cells by adding cells of the committed
-     * string. */
-    if (input_conv.vc_type != CONV_NONE)
-    {
-	im_str = string_convert(&input_conv, (char_u *)str, &len);
-	g_return_if_fail(im_str != NULL);
-    }
-    else
-	im_str = (char_u *)str;
-
-    clen = mb_string2cells(im_str, len);
-
-    if (input_conv.vc_type != CONV_NONE)
-	vim_free(im_str);
-    preedit_start_col += clen;
 
     /* Is this a single character that matches a keypad key that's just
      * been pressed?  If so, we don't want it to be entered as such - let
@@ -4940,14 +5096,17 @@ im_commit_cb(GtkIMContext *context UNUSED,
     if (add_to_input)
 	im_add_to_input((char_u *)str, slen);
 
-    /* Inserting chars while "im_is_active" is set does not cause a change of
-     * buffer.  When the chars are committed the buffer must be marked as
-     * changed. */
-    if (!commit_with_preedit)
-	preedit_start_col = MAXCOL;
+    if (p_imst == IM_ON_THE_SPOT)
+    {
+	/* Inserting chars while "im_is_active" is set does not cause a
+	 * change of buffer.  When the chars are committed the buffer must be
+	 * marked as changed. */
+	if (!commit_with_preedit)
+	    preedit_start_col = MAXCOL;
 
-    /* This flag is used in changed() at next call. */
-    xim_changed_while_preediting = TRUE;
+	/* This flag is used in changed() at next call. */
+	xim_changed_while_preediting = TRUE;
+    }
 
     if (gtk_main_level() > 0)
 	gtk_main_quit();
@@ -4981,7 +5140,8 @@ im_preedit_end_cb(GtkIMContext *context UNUSED, gpointer data UNUSED)
     im_delete_preedit();
 
     /* Indicate that preediting has finished */
-    preedit_start_col = MAXCOL;
+    if (p_imst == IM_ON_THE_SPOT)
+	preedit_start_col = MAXCOL;
     xim_has_preediting = FALSE;
 
 #if 0
@@ -5042,9 +5202,14 @@ im_preedit_changed_cb(GtkIMContext *context, gpointer data UNUSED)
     char_u  *p;
     int	    i;
 
-    gtk_im_context_get_preedit_string(context,
-				      &preedit_string, NULL,
-				      &cursor_index);
+    if (p_imst == IM_ON_THE_SPOT)
+	gtk_im_context_get_preedit_string(context,
+					  &preedit_string, NULL,
+					  &cursor_index);
+    else
+	gtk_im_context_get_preedit_string(context,
+					  &preedit_string, NULL,
+					  NULL);
 
 #ifdef XIM_DEBUG
     xim_log("im_preedit_changed_cb(): %s\n", preedit_string);
@@ -5052,66 +5217,82 @@ im_preedit_changed_cb(GtkIMContext *context, gpointer data UNUSED)
 
     g_return_if_fail(preedit_string != NULL); /* just in case */
 
-    /* If preedit_start_col is MAXCOL set it to the current cursor position. */
-    if (preedit_start_col == MAXCOL && preedit_string[0] != '\0')
+    if (p_imst == IM_OVER_THE_SPOT)
     {
-	xim_has_preediting = TRUE;
-
-	/* Urgh, this breaks if the input buffer isn't empty now */
-	init_preedit_start_col();
+	if (preedit_string[0] == NUL)
+	{
+	    xim_has_preediting = FALSE;
+	    im_delete_preedit();
+	}
+	else
+	{
+	    xim_has_preediting = TRUE;
+	    im_show_preedit();
+	}
     }
-    else if (cursor_index == 0 && preedit_string[0] == '\0')
+    else
     {
-	xim_has_preediting = FALSE;
+	/* If preedit_start_col is MAXCOL set it to the current cursor position. */
+	if (preedit_start_col == MAXCOL && preedit_string[0] != '\0')
+	{
+	    xim_has_preediting = TRUE;
 
-	/* If at the start position (after typing backspace)
-	 * preedit_start_col must be reset. */
-	preedit_start_col = MAXCOL;
-    }
+	    /* Urgh, this breaks if the input buffer isn't empty now */
+	    init_preedit_start_col();
+	}
+	else if (cursor_index == 0 && preedit_string[0] == '\0')
+	{
+	    xim_has_preediting = FALSE;
 
-    im_delete_preedit();
+	    /* If at the start position (after typing backspace)
+	     * preedit_start_col must be reset. */
+	    preedit_start_col = MAXCOL;
+	}
 
-    /*
-     * Compute the end of the preediting area: "preedit_end_col".
-     * According to the documentation of gtk_im_context_get_preedit_string(),
-     * the cursor_pos output argument returns the offset in bytes.  This is
-     * unfortunately not true -- real life shows the offset is in characters,
-     * and the GTK+ source code agrees with me.  Will file a bug later.
-     */
-    if (preedit_start_col != MAXCOL)
-	preedit_end_col = preedit_start_col;
-    str = (char_u *)preedit_string;
-    for (p = str, i = 0; *p != NUL; p += utf_byte2len(*p), ++i)
-    {
-	int is_composing;
+	im_delete_preedit();
 
-	is_composing = ((*p & 0x80) != 0 && utf_iscomposing(utf_ptr2char(p)));
 	/*
-	 * These offsets are used as counters when generating <BS> and <Del>
-	 * to delete the preedit string.  So don't count composing characters
-	 * unless 'delcombine' is enabled.
+	 * Compute the end of the preediting area: "preedit_end_col".
+	 * According to the documentation of gtk_im_context_get_preedit_string(),
+	 * the cursor_pos output argument returns the offset in bytes.  This is
+	 * unfortunately not true -- real life shows the offset is in characters,
+	 * and the GTK+ source code agrees with me.  Will file a bug later.
 	 */
-	if (!is_composing || p_deco)
-	{
-	    if (i < cursor_index)
-		++im_preedit_cursor;
-	    else
-		++im_preedit_trailing;
-	}
-	if (!is_composing && i >= cursor_index)
-	{
-	    /* This is essentially the same as im_preedit_trailing, except
-	     * composing characters are not counted even if p_deco is set. */
-	    ++num_move_back;
-	}
 	if (preedit_start_col != MAXCOL)
-	    preedit_end_col += utf_ptr2cells(p);
-    }
+	    preedit_end_col = preedit_start_col;
+	str = (char_u *)preedit_string;
+	for (p = str, i = 0; *p != NUL; p += utf_byte2len(*p), ++i)
+	{
+	    int is_composing;
 
-    if (p > str)
-    {
-	im_add_to_input(str, (int)(p - str));
-	im_correct_cursor(num_move_back);
+	    is_composing = ((*p & 0x80) != 0 && utf_iscomposing(utf_ptr2char(p)));
+	    /*
+	     * These offsets are used as counters when generating <BS> and <Del>
+	     * to delete the preedit string.  So don't count composing characters
+	     * unless 'delcombine' is enabled.
+	     */
+	    if (!is_composing || p_deco)
+	    {
+		if (i < cursor_index)
+		    ++im_preedit_cursor;
+		else
+		    ++im_preedit_trailing;
+	    }
+	    if (!is_composing && i >= cursor_index)
+	    {
+		/* This is essentially the same as im_preedit_trailing, except
+		 * composing characters are not counted even if p_deco is set. */
+		++num_move_back;
+	    }
+	    if (preedit_start_col != MAXCOL)
+		preedit_end_col += utf_ptr2cells(p);
+	}
+
+	if (p > str)
+	{
+	    im_add_to_input(str, (int)(p - str));
+	    im_correct_cursor(num_move_back);
+	}
     }
 
     g_free(preedit_string);
@@ -5260,7 +5441,8 @@ im_shutdown(void)
     }
     im_is_active = FALSE;
     im_commit_handler_id = 0;
-    preedit_start_col = MAXCOL;
+    if (p_imst == IM_ON_THE_SPOT)
+	preedit_start_col = MAXCOL;
     xim_has_preediting = FALSE;
 }
 
@@ -5339,17 +5521,12 @@ im_synthesize_keypress(unsigned int keyval, unsigned int state)
 {
     GdkEventKey *event;
 
-#  ifdef HAVE_GTK_MULTIHEAD
     event = (GdkEventKey *)gdk_event_new(GDK_KEY_PRESS);
-#   if GTK_CHECK_VERSION(3,0,0)
+#  if GTK_CHECK_VERSION(3,0,0)
     g_object_ref(gtk_widget_get_window(gui.drawarea));
 					/* unreffed by gdk_event_free() */
-#   else
-    g_object_ref(gui.drawarea->window); /* unreffed by gdk_event_free() */
-#   endif
 #  else
-    event = (GdkEventKey *)g_malloc0((gulong)sizeof(GdkEvent));
-    event->type = GDK_KEY_PRESS;
+    g_object_ref(gui.drawarea->window); /* unreffed by gdk_event_free() */
 #  endif
 #  if GTK_CHECK_VERSION(3,0,0)
     event->window = gtk_widget_get_window(gui.drawarea);
@@ -5372,11 +5549,7 @@ im_synthesize_keypress(unsigned int keyval, unsigned int state)
     event->send_event = FALSE;
     gtk_im_context_filter_keypress(xic, event);
 
-#  ifdef HAVE_GTK_MULTIHEAD
     gdk_event_free((GdkEvent *)event);
-#  else
-    g_free(event);
-#  endif
 }
 
     void
@@ -5424,7 +5597,8 @@ xim_reset(void)
 	}
     }
 
-    preedit_start_col = MAXCOL;
+    if (p_imst == IM_ON_THE_SPOT)
+	preedit_start_col = MAXCOL;
     xim_has_preediting = FALSE;
 }
 
@@ -5529,19 +5703,22 @@ xim_queue_key_press_event(GdkEventKey *event, int down)
 	{
 	    int imresult = gtk_im_context_filter_keypress(xic, event);
 
-	    /* Some XIM send following sequence:
-	     * 1. preedited string.
-	     * 2. committed string.
-	     * 3. line changed key.
-	     * 4. preedited string.
-	     * 5. remove preedited string.
-	     * if 3, Vim can't move back the above line for 5.
-	     * thus, this part should not parse the key. */
-	    if (!imresult && preedit_start_col != MAXCOL
-					       && event->keyval == GDK_Return)
+	    if (p_imst == IM_ON_THE_SPOT)
 	    {
-		im_synthesize_keypress(GDK_Return, 0U);
-		return FALSE;
+		/* Some XIM send following sequence:
+		 * 1. preedited string.
+		 * 2. committed string.
+		 * 3. line changed key.
+		 * 4. preedited string.
+		 * 5. remove preedited string.
+		 * if 3, Vim can't move back the above line for 5.
+		 * thus, this part should not parse the key. */
+		if (!imresult && preedit_start_col != MAXCOL
+					    && event->keyval == GDK_Return)
+		{
+		    im_synthesize_keypress(GDK_Return, 0U);
+		    return FALSE;
+		}
 	    }
 
 	    /* If XIM tried to commit a keypad key as a single char.,
@@ -5735,7 +5912,7 @@ static char e_xim[] = N_("E285: Failed to create input context");
 #endif
 
 #if defined(FEAT_GUI_X11) || defined(PROTO)
-# if defined(XtSpecificationRelease) && XtSpecificationRelease >= 6 && !defined(sun)
+# if defined(XtSpecificationRelease) && XtSpecificationRelease >= 6 && !defined(SUN_SYSTEM)
 #  define USE_X11R6_XIM
 # endif
 
@@ -5743,7 +5920,6 @@ static int xim_real_init(Window x11_window, Display *x11_display);
 
 
 #ifdef USE_X11R6_XIM
-static void xim_instantiate_cb(Display *display, XPointer client_data, XPointer	call_data);
 static void xim_destroy_cb(XIM im, XPointer client_data, XPointer call_data);
 
     static void

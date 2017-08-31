@@ -111,18 +111,21 @@ read_buffer(
     {
 	/* Set or reset 'modified' before executing autocommands, so that
 	 * it can be changed there. */
-	if (!readonlymode && !bufempty())
+	if (!readonlymode && !BUFEMPTY())
 	    changed();
-	else if (retval != FAIL)
+	else if (retval == OK)
 	    unchanged(curbuf, FALSE);
 
 #ifdef FEAT_AUTOCMD
+	if (retval == OK)
+	{
 # ifdef FEAT_EVAL
-	apply_autocmds_retval(EVENT_STDINREADPOST, NULL, NULL, FALSE,
+	    apply_autocmds_retval(EVENT_STDINREADPOST, NULL, NULL, FALSE,
 							curbuf, &retval);
 # else
-	apply_autocmds(EVENT_STDINREADPOST, NULL, NULL, FALSE, curbuf);
+	    apply_autocmds(EVENT_STDINREADPOST, NULL, NULL, FALSE, curbuf);
 # endif
+	}
 #endif
     }
     return retval;
@@ -246,7 +249,7 @@ open_buffer(
 	netbeansFireChanges = oldFire;
 #endif
 	/* Help buffer is filtered. */
-	if (curbuf->b_help)
+	if (bt_help(curbuf))
 	    fix_help_buffer();
     }
     else if (read_stdin)
@@ -294,7 +297,7 @@ open_buffer(
 #endif
        )
 	changed();
-    else if (retval != FAIL && !read_stdin && !read_fifo)
+    else if (retval == OK && !read_stdin && !read_fifo)
 	unchanged(curbuf, FALSE);
     save_file_ff(curbuf);		/* keep this fileformat */
 
@@ -328,7 +331,7 @@ open_buffer(
 # endif
 #endif
 
-    if (retval != FAIL)
+    if (retval == OK)
     {
 #ifdef FEAT_AUTOCMD
 	/*
@@ -369,18 +372,23 @@ open_buffer(
 set_bufref(bufref_T *bufref, buf_T *buf)
 {
     bufref->br_buf = buf;
+    bufref->br_fnum = buf == NULL ? 0 : buf->b_fnum;
     bufref->br_buf_free_count = buf_free_count;
 }
 
 /*
- * Return TRUE if "bufref->br_buf" points to a valid buffer.
+ * Return TRUE if "bufref->br_buf" points to the same buffer as when
+ * set_bufref() was called and it is a valid buffer.
  * Only goes through the buffer list if buf_free_count changed.
+ * Also checks if b_fnum is still the same, a :bwipe followed by :new might get
+ * the same allocated memory, but it's a different buffer.
  */
     int
 bufref_valid(bufref_T *bufref)
 {
     return bufref->br_buf_free_count == buf_free_count
-					   ? TRUE : buf_valid(bufref->br_buf);
+	? TRUE : buf_valid(bufref->br_buf)
+				  && bufref->br_fnum == bufref->br_buf->b_fnum;
 }
 
 /*
@@ -460,7 +468,31 @@ close_buffer(
     int		del_buf = (action == DOBUF_DEL || action == DOBUF_WIPE);
     int		wipe_buf = (action == DOBUF_WIPE);
 
-#ifdef FEAT_QUICKFIX
+#ifdef FEAT_TERMINAL
+    if (bt_terminal(buf))
+    {
+	if (term_job_running(buf->b_term))
+	{
+	    if (wipe_buf || unload_buf)
+		/* Wiping out or unloading a terminal buffer kills the job. */
+		free_terminal(buf);
+	    else
+	    {
+		/* The job keeps running, hide the buffer. */
+		del_buf = FALSE;
+		unload_buf = FALSE;
+	    }
+	}
+	else
+	{
+	    /* A terminal buffer is wiped out if the job has finished. */
+	    del_buf = TRUE;
+	    unload_buf = TRUE;
+	    wipe_buf = TRUE;
+	}
+    }
+    else
+#endif
     /*
      * Force unloading or deleting when 'bufhidden' says so.
      * The caller must take care of NOT deleting/freeing when 'bufhidden' is
@@ -479,7 +511,6 @@ close_buffer(
     }
     else if (buf->b_p_bh[0] == 'u')	/* 'bufhidden' == "unload" */
 	unload_buf = TRUE;
-#endif
 
 #ifdef FEAT_AUTOCMD
     /* Disallow deleting the buffer when it is locked (already being closed or
@@ -851,6 +882,9 @@ free_buffer(buf_T *buf)
 #ifdef FEAT_JOB_CHANNEL
     channel_buffer_free(buf);
 #endif
+#ifdef FEAT_TERMINAL
+    free_terminal(buf);
+#endif
 
     buf_hashtab_remove(buf);
 
@@ -870,6 +904,25 @@ free_buffer(buf_T *buf)
 }
 
 /*
+ * Initializes b:changedtick.
+ */
+    static void
+init_changedtick(buf_T *buf)
+{
+    dictitem_T *di = (dictitem_T *)&buf->b_ct_di;
+
+    di->di_flags = DI_FLAGS_FIX | DI_FLAGS_RO;
+    di->di_tv.v_type = VAR_NUMBER;
+    di->di_tv.v_lock = VAR_FIXED;
+    di->di_tv.vval.v_number = 0;
+
+#ifdef FEAT_EVAL
+    STRCPY(buf->b_ct_di.di_key, "changedtick");
+    (void)dict_add(buf->b_vars, di);
+#endif
+}
+
+/*
  * Free stuff in the buffer for ":bdel" and when wiping out the buffer.
  */
     static void
@@ -886,8 +939,14 @@ free_buffer_stuff(
 #endif
     }
 #ifdef FEAT_EVAL
-    vars_clear(&buf->b_vars->dv_hashtab); /* free all internal variables */
-    hash_init(&buf->b_vars->dv_hashtab);
+    {
+	varnumber_T tick = CHANGEDTICK(buf);
+
+	vars_clear(&buf->b_vars->dv_hashtab); /* free all buffer variables */
+	hash_init(&buf->b_vars->dv_hashtab);
+	init_changedtick(buf);
+	CHANGEDTICK(buf) = tick;
+    }
 #endif
 #ifdef FEAT_USR_CMDS
     uc_clear(&buf->b_ucmds);		/* clear local user commands */
@@ -1589,7 +1648,7 @@ do_buffer(
 	if (bufIsChanged(curbuf))
 #endif
 	{
-	    EMSG(_(e_nowrtmsg));
+	    no_write_message();
 	    return FAIL;
 	}
     }
@@ -1677,7 +1736,7 @@ set_curbuf(buf_T *buf, int action)
 		u_sync(FALSE);
 	    close_buffer(prevbuf == curwin->w_buffer ? curwin : NULL, prevbuf,
 		    unload ? action : (action == DOBUF_GOTO
-			&& !P_HID(prevbuf)
+			&& !buf_hide(prevbuf)
 			&& !bufIsChanged(prevbuf)) ? DOBUF_UNLOAD : 0, FALSE);
 #ifdef FEAT_WINDOWS
 	    if (curwin != previouswin && win_valid(previouswin))
@@ -1738,7 +1797,7 @@ enter_buffer(buf_T *buf)
 #endif
 
 #ifdef FEAT_SYN_HL
-    curwin->w_s = &(buf->b_s);
+    curwin->w_s = &(curbuf->b_s);
 #endif
 
     /* Cursor on first line by default. */
@@ -1838,6 +1897,28 @@ do_autochdir(void)
 }
 #endif
 
+    void
+no_write_message(void)
+{
+#ifdef FEAT_TERMINAL
+    if (term_job_running(curbuf->b_term))
+	EMSG(_("E948: Job still running (add ! to end the job)"));
+    else
+#endif
+	EMSG(_("E37: No write since last change (add ! to override)"));
+}
+
+    void
+no_write_message_nobang(void)
+{
+#ifdef FEAT_TERMINAL
+    if (term_job_running(curbuf->b_term))
+	EMSG(_("E948: Job still running"));
+    else
+#endif
+	EMSG(_("E37: No write since last change"));
+}
+
 /*
  * functions for dealing with the buffer list
  */
@@ -1931,7 +2012,7 @@ buflist_new(
 	    && curbuf != NULL
 	    && curbuf->b_ffname == NULL
 	    && curbuf->b_nwindows <= 1
-	    && (curbuf->b_ml.ml_mfp == NULL || bufempty()))
+	    && (curbuf->b_ml.ml_mfp == NULL || BUFEMPTY()))
     {
 	buf = curbuf;
 #ifdef FEAT_AUTOCMD
@@ -1946,16 +2027,14 @@ buflist_new(
 	    return NULL;
 # endif
 #endif
-#ifdef FEAT_QUICKFIX
-# ifdef FEAT_AUTOCMD
+#ifdef FEAT_AUTOCMD
 	if (buf == curbuf)
-# endif
+#endif
 	{
 	    /* Make sure 'bufhidden' and 'buftype' are empty */
 	    clear_string_option(&buf->b_p_bh);
 	    clear_string_option(&buf->b_p_bt);
 	}
-#endif
     }
     if (buf != curbuf || curbuf == NULL)
     {
@@ -1976,6 +2055,7 @@ buflist_new(
 	}
 	init_var_dict(buf->b_vars, &buf->b_bufvar, VAR_SCOPE);
 #endif
+	init_changedtick(buf);
     }
 
     if (ffname != NULL)
@@ -2128,10 +2208,8 @@ free_buf_options(
 	clear_string_option(&buf->b_p_fenc);
 #endif
 	clear_string_option(&buf->b_p_ff);
-#ifdef FEAT_QUICKFIX
 	clear_string_option(&buf->b_p_bh);
 	clear_string_option(&buf->b_p_bt);
-#endif
     }
 #ifdef FEAT_FIND_ID
     clear_string_option(&buf->b_p_def);
@@ -2150,6 +2228,7 @@ free_buf_options(
 #if defined(FEAT_CRYPT)
     clear_string_option(&buf->b_p_cm);
 #endif
+    clear_string_option(&buf->b_p_fp);
 #if defined(FEAT_EVAL)
     clear_string_option(&buf->b_p_fex);
 #endif
@@ -2225,17 +2304,20 @@ free_buf_options(
     clear_string_option(&buf->b_p_lw);
 #endif
     clear_string_option(&buf->b_p_bkc);
+#ifdef FEAT_MBYTE
+    clear_string_option(&buf->b_p_menc);
+#endif
 }
 
 /*
- * get alternate file n
- * set linenr to lnum or altfpos.lnum if lnum == 0
- *	also set cursor column to altfpos.col if 'startofline' is not set.
+ * Get alternate file "n".
+ * Set linenr to "lnum" or altfpos.lnum if "lnum" == 0.
+ *	Also set cursor column to altfpos.col if 'startofline' is not set.
  * if (options & GETF_SETMARK) call setpcmark()
  * if (options & GETF_ALT) we are jumping to an alternate file.
  * if (options & GETF_SWITCH) respect 'switchbuf' settings when jumping
  *
- * return FAIL for failure, OK for success
+ * Return FAIL for failure, OK for success.
  */
     int
 buflist_getfile(
@@ -2301,7 +2383,7 @@ buflist_getfile(
 	/* If 'switchbuf' contains "split", "vsplit" or "newtab" and the
 	 * current buffer isn't empty: open new tab or window */
 	if (wp == NULL && (swb_flags & (SWB_VSPLIT | SWB_SPLIT | SWB_NEWTAB))
-							       && !bufempty())
+							       && !BUFEMPTY())
 	{
 	    if (swb_flags & SWB_NEWTAB)
 		tabpage_new();
@@ -2314,8 +2396,8 @@ buflist_getfile(
 #endif
 
     ++RedrawingDisabled;
-    if (getfile(buf->b_fnum, NULL, NULL, (options & GETF_SETMARK),
-							  lnum, forceit) <= 0)
+    if (GETFILE_SUCCESS(getfile(buf->b_fnum, NULL, NULL,
+				     (options & GETF_SETMARK), lnum, forceit)))
     {
 	--RedrawingDisabled;
 
@@ -2966,7 +3048,7 @@ buflist_findlnum(buf_T *buf)
 
 #if defined(FEAT_LISTCMDS) || defined(PROTO)
 /*
- * List all know file names (for :files and :buffers command).
+ * List all known file names (for :files and :buffers command).
  */
     void
 buflist_list(exarg_T *eap)
@@ -2974,6 +3056,8 @@ buflist_list(exarg_T *eap)
     buf_T	*buf;
     int		len;
     int		i;
+    int		ro_char;
+    int		changed_char;
 
     for (buf = firstbuf; buf != NULL && !got_int; buf = buf->b_next)
     {
@@ -3000,6 +3084,21 @@ buflist_list(exarg_T *eap)
 	if (message_filtered(NameBuff))
 	    continue;
 
+	changed_char = (buf->b_flags & BF_READERR) ? 'x'
+					     : (bufIsChanged(buf) ? '+' : ' ');
+#ifdef FEAT_TERMINAL
+	if (term_job_running(buf->b_term))
+	{
+	    ro_char = 'R';
+	    changed_char = ' ';  /* bufIsChanged() returns TRUE to avoid
+				  * closing, but it's not actually changed. */
+	}
+	else if (buf->b_term != NULL)
+	    ro_char = 'F';
+	else
+#endif
+	    ro_char = !buf->b_p_ma ? '-' : (buf->b_p_ro ? '=' : ' ');
+
 	msg_putchar('\n');
 	len = vim_snprintf((char *)IObuff, IOSIZE - 20, "%3d%c%c%c%c%c \"%s\"",
 		buf->b_fnum,
@@ -3008,9 +3107,8 @@ buflist_list(exarg_T *eap)
 			(curwin->w_alt_fnum == buf->b_fnum ? '#' : ' '),
 		buf->b_ml.ml_mfp == NULL ? ' ' :
 			(buf->b_nwindows == 0 ? 'h' : 'a'),
-		!buf->b_p_ma ? '-' : (buf->b_p_ro ? '=' : ' '),
-		(buf->b_flags & BF_READERR) ? 'x'
-					    : (bufIsChanged(buf) ? '+' : ' '),
+		ro_char,
+		changed_char,
 		NameBuff);
 	if (len > IOSIZE - 20)
 	    len = IOSIZE - 20;
@@ -3591,6 +3689,13 @@ maketitle(void)
 #define SPACE_FOR_ARGNR (IOSIZE - 10)  /* at least room for " - VIM" */
 	    if (curbuf->b_fname == NULL)
 		vim_strncpy(buf, (char_u *)_("[No Name]"), SPACE_FOR_FNAME);
+#ifdef FEAT_TERMINAL
+	    else if (curbuf->b_term != NULL)
+	    {
+		vim_strncpy(buf, term_get_status_text(curbuf->b_term),
+							      SPACE_FOR_FNAME);
+	    }
+#endif
 	    else
 	    {
 		p = transstr(gettail(curbuf->b_fname));
@@ -3598,20 +3703,27 @@ maketitle(void)
 		vim_free(p);
 	    }
 
-	    switch (bufIsChanged(curbuf)
-		    + (curbuf->b_p_ro * 2)
-		    + (!curbuf->b_p_ma * 4))
-	    {
-		case 1: STRCAT(buf, " +"); break;
-		case 2: STRCAT(buf, " ="); break;
-		case 3: STRCAT(buf, " =+"); break;
-		case 4:
-		case 6: STRCAT(buf, " -"); break;
-		case 5:
-		case 7: STRCAT(buf, " -+"); break;
-	    }
+#ifdef FEAT_TERMINAL
+	    if (curbuf->b_term == NULL)
+#endif
+		switch (bufIsChanged(curbuf)
+			+ (curbuf->b_p_ro * 2)
+			+ (!curbuf->b_p_ma * 4))
+		{
+		    case 1: STRCAT(buf, " +"); break;
+		    case 2: STRCAT(buf, " ="); break;
+		    case 3: STRCAT(buf, " =+"); break;
+		    case 4:
+		    case 6: STRCAT(buf, " -"); break;
+		    case 5:
+		    case 7: STRCAT(buf, " -+"); break;
+		}
 
-	    if (curbuf->b_fname != NULL)
+	    if (curbuf->b_fname != NULL
+#ifdef FEAT_TERMINAL
+		    && curbuf->b_term == NULL
+#endif
+		    )
 	    {
 		/* Get path of file, replace home dir with ~ */
 		off = (int)STRLEN(buf);
@@ -3627,9 +3739,11 @@ maketitle(void)
 		/* remove the file name */
 		p = gettail_sep(buf + off);
 		if (p == buf + off)
+		{
 		    /* must be a help buffer */
 		    vim_strncpy(buf + off, (char_u *)_("help"),
 					   (size_t)(SPACE_FOR_DIR - off - 1));
+		}
 		else
 		    *p = NUL;
 
@@ -4858,8 +4972,8 @@ do_arg_all(
 	    wpnext = wp->w_next;
 	    buf = wp->w_buffer;
 	    if (buf->b_ffname == NULL
-		    || (!keep_tabs && buf->b_nwindows > 1)
-		    || wp->w_width != Columns)
+		    || (!keep_tabs && (buf->b_nwindows > 1
+			    || wp->w_width != Columns)))
 		i = opened_len;
 	    else
 	    {
@@ -4910,12 +5024,12 @@ do_arg_all(
 
 	    if (i == opened_len && !keep_tabs)/* close this window */
 	    {
-		if (P_HID(buf) || forceit || buf->b_nwindows > 1
+		if (buf_hide(buf) || forceit || buf->b_nwindows > 1
 							|| !bufIsChanged(buf))
 		{
 		    /* If the buffer was changed, and we would like to hide it,
 		     * try autowriting. */
-		    if (!P_HID(buf) && buf->b_nwindows <= 1
+		    if (!buf_hide(buf) && buf->b_nwindows <= 1
 							 && bufIsChanged(buf))
 		    {
 #ifdef FEAT_AUTOCMD
@@ -4942,7 +5056,7 @@ do_arg_all(
 #ifdef FEAT_WINDOWS
 		    else
 		    {
-			win_close(wp, !P_HID(buf) && !bufIsChanged(buf));
+			win_close(wp, !buf_hide(buf) && !bufIsChanged(buf));
 # ifdef FEAT_AUTOCMD
 			/* check if autocommands removed the next window */
 			if (!win_valid(wpnext))
@@ -4984,7 +5098,7 @@ do_arg_all(
 #ifdef FEAT_WINDOWS
     /* ":drop all" should re-use an empty window to avoid "--remote-tab"
      * leaving an empty tab page when executed locally. */
-    if (keep_tabs && bufempty() && curbuf->b_nwindows == 1
+    if (keep_tabs && BUFEMPTY() && curbuf->b_nwindows == 1
 			    && curbuf->b_ffname == NULL && !curbuf->b_changed)
 	use_firstwin = TRUE;
 #endif
@@ -5041,7 +5155,7 @@ do_arg_all(
 	    }
 	    (void)do_ecmd(0, alist_name(&AARGLIST(alist)[i]), NULL, NULL,
 		      ECMD_ONE,
-		      ((P_HID(curwin->w_buffer)
+		      ((buf_hide(curwin->w_buffer)
 			   || bufIsChanged(curwin->w_buffer)) ? ECMD_HIDE : 0)
 						       + ECMD_OLDBUF, curwin);
 #ifdef FEAT_AUTOCMD
@@ -5296,7 +5410,7 @@ ex_buffer_all(exarg_T *eap)
      */
     for (wp = lastwin; open_wins > count; )
     {
-	r = (P_HID(wp->w_buffer) || !bufIsChanged(wp->w_buffer)
+	r = (buf_hide(wp->w_buffer) || !bufIsChanged(wp->w_buffer)
 				     || autowrite(wp->w_buffer, FALSE) == OK);
 #ifdef FEAT_AUTOCMD
 	if (!win_valid(wp))
@@ -5308,7 +5422,7 @@ ex_buffer_all(exarg_T *eap)
 #endif
 	    if (r)
 	{
-	    win_close(wp, !P_HID(wp->w_buffer));
+	    win_close(wp, !buf_hide(wp->w_buffer));
 	    --open_wins;
 	    wp = lastwin;
 	}
@@ -5583,6 +5697,9 @@ write_viminfo_bufferlist(FILE *fp)
 #ifdef FEAT_QUICKFIX
 		|| bt_quickfix(buf)
 #endif
+#ifdef FEAT_TERMINAL
+		|| bt_terminal(buf)
+#endif
 		|| removable(buf->b_ffname))
 	    continue;
 
@@ -5599,6 +5716,82 @@ write_viminfo_bufferlist(FILE *fp)
 }
 #endif
 
+/*
+ * Return TRUE if "buf" is the quickfix buffer.
+ */
+    int
+bt_quickfix(buf_T *buf)
+{
+    return buf != NULL && buf->b_p_bt[0] == 'q';
+}
+
+/*
+ * Return TRUE if "buf" is a terminal buffer.
+ */
+    int
+bt_terminal(buf_T *buf)
+{
+    return buf != NULL && buf->b_p_bt[0] == 't';
+}
+
+/*
+ * Return TRUE if "buf" is a help buffer.
+ */
+    int
+bt_help(buf_T *buf)
+{
+    return buf != NULL && buf->b_help;
+}
+
+/*
+ * Return TRUE if "buf" is a "nofile", "acwrite" or "terminal" buffer.
+ * This means the buffer name is not a file name.
+ */
+    int
+bt_nofile(buf_T *buf)
+{
+    return buf != NULL && ((buf->b_p_bt[0] == 'n' && buf->b_p_bt[2] == 'f')
+	    || buf->b_p_bt[0] == 'a'
+	    || buf->b_p_bt[0] == 't');
+}
+
+/*
+ * Return TRUE if "buf" is a "nowrite", "nofile" or "terminal" buffer.
+ */
+    int
+bt_dontwrite(buf_T *buf)
+{
+    return buf != NULL && (buf->b_p_bt[0] == 'n' || buf->b_p_bt[0] == 't');
+}
+
+    int
+bt_dontwrite_msg(buf_T *buf)
+{
+    if (bt_dontwrite(buf))
+    {
+	EMSG(_("E382: Cannot write, 'buftype' option is set"));
+	return TRUE;
+    }
+    return FALSE;
+}
+
+/*
+ * Return TRUE if the buffer should be hidden, according to 'hidden', ":hide"
+ * and 'bufhidden'.
+ */
+    int
+buf_hide(buf_T *buf)
+{
+    /* 'bufhidden' overrules 'hidden' and ":hide", check it first */
+    switch (buf->b_p_bh[0])
+    {
+	case 'u':		    /* "unload" */
+	case 'w':		    /* "wipe" */
+	case 'd': return FALSE;	    /* "delete" */
+	case 'h': return TRUE;	    /* "hide" */
+    }
+    return (p_hid || cmdmod.hide);
+}
 
 /*
  * Return special buffer name.
@@ -5623,23 +5816,70 @@ buf_spname(buf_T *buf)
 	    return (char_u *)_(msg_qflist);
     }
 #endif
-#ifdef FEAT_QUICKFIX
+
     /* There is no _file_ when 'buftype' is "nofile", b_sfname
-     * contains the name as specified by the user */
+     * contains the name as specified by the user. */
     if (bt_nofile(buf))
     {
-	if (buf->b_sfname != NULL)
-	    return buf->b_sfname;
+#ifdef FEAT_TERMINAL
+	if (buf->b_term != NULL)
+	    return term_get_status_text(buf->b_term);
+#endif
+	if (buf->b_fname != NULL)
+	    return buf->b_fname;
 	return (char_u *)_("[Scratch]");
     }
-#endif
+
     if (buf->b_fname == NULL)
 	return (char_u *)_("[No Name]");
     return NULL;
 }
 
-#if (defined(FEAT_QUICKFIX) && defined(FEAT_WINDOWS)) \
+#if defined(FEAT_JOB_CHANNEL) \
 	|| defined(FEAT_PYTHON) || defined(FEAT_PYTHON3) \
+	|| defined(PROTO)
+# define SWITCH_TO_WIN
+
+/*
+ * Find a window that contains "buf" and switch to it.
+ * If there is no such window, use the current window and change "curbuf".
+ * Caller must initialize save_curbuf to NULL.
+ * restore_win_for_buf() MUST be called later!
+ */
+    void
+switch_to_win_for_buf(
+    buf_T	*buf,
+    win_T	**save_curwinp,
+    tabpage_T	**save_curtabp,
+    bufref_T	*save_curbuf)
+{
+    win_T	*wp;
+    tabpage_T	*tp;
+
+    if (find_win_for_buf(buf, &wp, &tp) == FAIL)
+	switch_buffer(save_curbuf, buf);
+    else if (switch_win(save_curwinp, save_curtabp, wp, tp, TRUE) == FAIL)
+    {
+	restore_win(*save_curwinp, *save_curtabp, TRUE);
+	switch_buffer(save_curbuf, buf);
+    }
+}
+
+    void
+restore_win_for_buf(
+    win_T	*save_curwin,
+    tabpage_T	*save_curtab,
+    bufref_T	*save_curbuf)
+{
+    if (save_curbuf->br_buf == NULL)
+	restore_win(save_curwin, save_curtab, TRUE);
+    else
+	restore_buffer(save_curbuf);
+}
+#endif
+
+#if (defined(FEAT_QUICKFIX) && defined(FEAT_WINDOWS)) \
+	|| defined(SWITCH_TO_WIN) \
 	|| defined(PROTO)
 /*
  * Find a window for buffer "buf".
@@ -5988,7 +6228,7 @@ sign_list_placed(buf_T *rbuf)
 	if (buf->b_signlist != NULL)
 	{
 	    vim_snprintf(lbuf, BUFSIZ, _("Signs for %s:"), buf->b_fname);
-	    MSG_PUTS_ATTR(lbuf, hl_attr(HLF_D));
+	    MSG_PUTS_ATTR(lbuf, HL_ATTR(HLF_D));
 	    msg_putchar('\n');
 	}
 	for (p = buf->b_signlist; p != NULL && !got_int; p = p->next)

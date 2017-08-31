@@ -1183,6 +1183,7 @@ timer_callback(timer_T *timer)
 /*
  * Call timers that are due.
  * Return the time in msec until the next timer is due.
+ * Returns -1 if there are no pending timers.
  */
     long
 check_due_timer(void)
@@ -1193,10 +1194,17 @@ check_due_timer(void)
     long	next_due = -1;
     proftime_T	now;
     int		did_one = FALSE;
+    int		need_update_screen = FALSE;
     long	current_id = last_timer_id;
 # ifdef WIN3264
     LARGE_INTEGER   fr;
+# endif
 
+    /* Don't run any timers while exiting or dealing with an error. */
+    if (exiting || aborting())
+	return next_due;
+
+# ifdef WIN3264
     QueryPerformanceFrequency(&fr);
 # endif
     profile_start(&now);
@@ -1209,15 +1217,41 @@ check_due_timer(void)
 	this_due = GET_TIMEDIFF(timer, now);
 	if (this_due <= 1)
 	{
+	    int save_timer_busy = timer_busy;
+	    int save_vgetc_busy = vgetc_busy;
+	    int did_emsg_save = did_emsg;
+	    int called_emsg_save = called_emsg;
+	    int did_throw_save = did_throw;
+	    int	save_must_redraw = must_redraw;
+
+	    timer_busy = timer_busy > 0 || vgetc_busy > 0;
+	    vgetc_busy = 0;
+	    called_emsg = FALSE;
+	    must_redraw = 0;
 	    timer->tr_firing = TRUE;
 	    timer_callback(timer);
 	    timer->tr_firing = FALSE;
 	    timer_next = timer->tr_next;
 	    did_one = TRUE;
+	    timer_busy = save_timer_busy;
+	    vgetc_busy = save_vgetc_busy;
+	    if (called_emsg)
+	    {
+		++timer->tr_emsg_count;
+		if (!did_throw_save && did_throw && current_exception != NULL)
+		    discard_current_exception();
+	    }
+	    did_emsg = did_emsg_save;
+	    called_emsg = called_emsg_save;
+	    if (must_redraw != 0)
+		need_update_screen = TRUE;
+	    must_redraw = must_redraw > save_must_redraw
+					      ? must_redraw : save_must_redraw;
 
 	    /* Only fire the timer again if it repeats and stop_timer() wasn't
 	     * called while inside the callback (tr_id == -1). */
-	    if (timer->tr_repeat != 0 && timer->tr_id != -1)
+	    if (timer->tr_repeat != 0 && timer->tr_id != -1
+		    && timer->tr_emsg_count < 3)
 	    {
 		profile_setlimit(timer->tr_interval, &timer->tr_due);
 		this_due = GET_TIMEDIFF(timer, now);
@@ -1238,7 +1272,7 @@ check_due_timer(void)
     }
 
     if (did_one)
-	redraw_after_callback();
+	redraw_after_callback(need_update_screen);
 
     return current_id != last_timer_id ? 1 : next_due;
 }
@@ -1907,9 +1941,9 @@ check_changed(buf_T *buf, int flags)
 	}
 #endif
 	if (flags & CCGD_EXCMD)
-	    EMSG(_(e_nowrtmsg));
+	    no_write_message();
 	else
-	    EMSG(_(e_nowrtmsg_nobang));
+	    no_write_message_nobang();
 	return TRUE;
     }
     return FALSE;
@@ -1954,9 +1988,7 @@ dialog_changed(
     buf_T	*buf2;
     exarg_T     ea;
 
-    dialog_msg(buff, _("Save changes to \"%s\"?"),
-			(buf->b_fname != NULL) ?
-			buf->b_fname : (char_u *)_("Untitled"));
+    dialog_msg(buff, _("Save changes to \"%s\"?"), buf->b_fname);
     if (checkall)
 	ret = vim_dialog_yesnoallcancel(VIM_QUESTION, NULL, buff, 1);
     else
@@ -2037,7 +2069,7 @@ dialog_changed(
     int
 can_abandon(buf_T *buf, int forceit)
 {
-    return (	   P_HID(buf)
+    return (	   buf_hide(buf)
 		|| !bufIsChanged(buf)
 		|| buf->b_nwindows > 1
 		|| autowrite(buf, forceit) == OK
@@ -2153,7 +2185,14 @@ check_changed_any(
 	    msg_col = 0;
 	    msg_didout = FALSE;
 	}
-	if (EMSG2(_("E162: No write since last change for buffer \"%s\""),
+	if (
+#ifdef FEAT_TERMINAL
+		term_job_running(buf->b_term)
+		    ? EMSG2(_("E947: Job still running in buffer \"%s\""),
+								  buf->b_fname)
+		    :
+#endif
+		EMSG2(_("E162: No write since last change for buffer \"%s\""),
 		    buf_spname(buf) != NULL ? buf_spname(buf) : buf->b_fname))
 	{
 	    save = no_wait_return;
@@ -2230,7 +2269,7 @@ buf_write_all(buf_T *buf, int forceit)
 #ifdef FEAT_AUTOCMD
     if (curbuf != old_curbuf)
     {
-	msg_source(hl_attr(HLF_W));
+	msg_source(HL_ATTR(HLF_W));
 	MSG(_("Warning: Entered other buffer unexpectedly (check autocommands)"));
     }
 #endif
@@ -2293,8 +2332,8 @@ do_one_arg(char_u *str)
  * Separate the arguments in "str" and return a list of pointers in the
  * growarray "gap".
  */
-    int
-get_arglist(garray_T *gap, char_u *str)
+    static int
+get_arglist(garray_T *gap, char_u *str, int escaped)
 {
     ga_init2(gap, (int)sizeof(char_u *), 20);
     while (*str != NUL)
@@ -2305,6 +2344,10 @@ get_arglist(garray_T *gap, char_u *str)
 	    return FAIL;
 	}
 	((char_u **)gap->ga_data)[gap->ga_len++] = str;
+
+	/* If str is escaped, don't handle backslashes or spaces */
+	if (!escaped)
+	    return OK;
 
 	/* Isolate one argument, change it in-place, put a NUL after it. */
 	str = do_one_arg(str);
@@ -2328,7 +2371,7 @@ get_arglist_exp(
     garray_T	ga;
     int		i;
 
-    if (get_arglist(&ga, str) == FAIL)
+    if (get_arglist(&ga, str, TRUE) == FAIL)
 	return FAIL;
     if (wig == TRUE)
 	i = expand_wildcards(ga.ga_len, (char_u **)ga.ga_data,
@@ -2374,6 +2417,7 @@ do_arglist(
     char_u	*p;
     int		match;
 #endif
+    int		arg_escaped = TRUE;
 
     /*
      * Set default argument for ":argadd" command.
@@ -2383,12 +2427,13 @@ do_arglist(
 	if (curbuf->b_ffname == NULL)
 	    return FAIL;
 	str = curbuf->b_fname;
+	arg_escaped = FALSE;
     }
 
     /*
      * Collect all file name arguments in "new_ga".
      */
-    if (get_arglist(&new_ga, str) == FAIL)
+    if (get_arglist(&new_ga, str, arg_escaped) == FAIL)
 	return FAIL;
 
 #ifdef FEAT_LISTCMDS
@@ -2701,13 +2746,13 @@ do_argfile(exarg_T *eap, int argn)
 	     * the same buffer
 	     */
 	    other = TRUE;
-	    if (P_HID(curbuf))
+	    if (buf_hide(curbuf))
 	    {
 		p = fix_fname(alist_name(&ARGLIST[argn]));
 		other = otherfile(p);
 		vim_free(p);
 	    }
-	    if ((!P_HID(curbuf) || !other)
+	    if ((!buf_hide(curbuf) || !other)
 		  && check_changed(curbuf, CCGD_AW
 					 | (other ? 0 : CCGD_MULTWIN)
 					 | (eap->forceit ? CCGD_FORCEIT : 0)
@@ -2728,7 +2773,7 @@ do_argfile(exarg_T *eap, int argn)
 	 * argument index. */
 	if (do_ecmd(0, alist_name(&ARGLIST[curwin->w_arg_idx]), NULL,
 		      eap, ECMD_LAST,
-		      (P_HID(curwin->w_buffer) ? ECMD_HIDE : 0)
+		      (buf_hide(curwin->w_buffer) ? ECMD_HIDE : 0)
 			 + (eap->forceit ? ECMD_FORCEIT : 0), curwin) == FAIL)
 	    curwin->w_arg_idx = old_arg_idx;
 	/* like Vi: set the mark where the cursor is in the file. */
@@ -2749,7 +2794,7 @@ ex_next(exarg_T *eap)
      * check for changed buffer now, if this fails the argument list is not
      * redefined.
      */
-    if (       P_HID(curbuf)
+    if (       buf_hide(curbuf)
 	    || eap->cmdidx == CMD_snext
 	    || !check_changed(curbuf, CCGD_AW
 				    | (eap->forceit ? CCGD_FORCEIT : 0)
@@ -2774,34 +2819,20 @@ ex_next(exarg_T *eap)
     void
 ex_argedit(exarg_T *eap)
 {
-    int		fnum;
-    int		i;
-    char_u	*s;
+    int i = eap->addr_count ? (int)eap->line2 : curwin->w_arg_idx + 1;
 
-    /* Add the argument to the buffer list and get the buffer number. */
-    fnum = buflist_add(eap->arg, BLN_LISTED);
+    if (do_arglist(eap->arg, AL_ADD, i) == FAIL)
+	return;
+#ifdef FEAT_TITLE
+    maketitle();
+#endif
 
-    /* Check if this argument is already in the argument list. */
-    for (i = 0; i < ARGCOUNT; ++i)
-	if (ARGLIST[i].ae_fnum == fnum)
-	    break;
-    if (i == ARGCOUNT)
-    {
-	/* Can't find it, add it to the argument list. */
-	s = vim_strsave(eap->arg);
-	if (s == NULL)
-	    return;
-	i = alist_add_list(1, &s,
-	       eap->addr_count > 0 ? (int)eap->line2 : curwin->w_arg_idx + 1);
-	if (i < 0)
-	    return;
-	curwin->w_arg_idx = i;
-    }
-
-    alist_check_arg_idx();
-
+    if (curwin->w_arg_idx == 0 && (curbuf->b_ml.ml_flags & ML_EMPTY)
+	    && curbuf->b_ffname == NULL)
+	i = 0;
     /* Edit the argument. */
-    do_argfile(eap, i);
+    if (i < ARGCOUNT)
+	do_argfile(eap, i);
 }
 
 /*
@@ -2832,8 +2863,15 @@ ex_argdelete(exarg_T *eap)
 	if (eap->line2 > ARGCOUNT)
 	    eap->line2 = ARGCOUNT;
 	n = eap->line2 - eap->line1 + 1;
-	if (*eap->arg != NUL || n <= 0)
+	if (*eap->arg != NUL)
+	    /* Can't have both a range and an argument. */
 	    EMSG(_(e_invarg));
+	else if (n <= 0)
+	{
+	    /* Don't give an error for ":%argdel" if the list is empty. */
+	    if (eap->line1 != 1 || eap->line2 != 0)
+		EMSG(_(e_invrange));
+	}
 	else
 	{
 	    for (i = eap->line1; i <= eap->line2; ++i)
@@ -2911,7 +2949,7 @@ ex_listdo(exarg_T *eap)
 
     if (eap->cmdidx == CMD_windo
 	    || eap->cmdidx == CMD_tabdo
-	    || P_HID(curbuf)
+	    || buf_hide(curbuf)
 	    || !check_changed(curbuf, CCGD_AW
 				    | (eap->forceit ? CCGD_FORCEIT : 0)
 				    | CCGD_EXCMD))
@@ -3272,19 +3310,6 @@ source_callback(char_u *fname, void *cookie UNUSED)
 }
 
 /*
- * Source the file "name" from all directories in 'runtimepath'.
- * "name" can contain wildcards.
- * When "flags" has DIP_ALL: source all files, otherwise only the first one.
- *
- * return FAIL when no file could be sourced, OK otherwise.
- */
-    int
-source_runtime(char_u *name, int flags)
-{
-    return do_in_runtimepath(name, flags, source_callback, NULL);
-}
-
-/*
  * Find the file "name" in all directories in "path" and invoke
  * "callback(fname, cookie)".
  * "name" can contain wildcards.
@@ -3421,18 +3446,19 @@ do_in_path(
 }
 
 /*
- * Find "name" in 'runtimepath'.  When found, invoke the callback function for
+ * Find "name" in "path".  When found, invoke the callback function for
  * it: callback(fname, "cookie")
  * When "flags" has DIP_ALL repeat for all matches, otherwise only the first
  * one is used.
  * Returns OK when at least one match found, FAIL otherwise.
  *
- * If "name" is NULL calls callback for each entry in runtimepath. Cookie is
+ * If "name" is NULL calls callback for each entry in "path". Cookie is
  * passed by reference in this case, setting it to NULL indicates that callback
  * has done its job.
  */
-    int
-do_in_runtimepath(
+    static int
+do_in_path_and_pp(
+    char_u	*path,
     char_u	*name,
     int		flags,
     void	(*callback)(char_u *fname, void *ck),
@@ -3445,7 +3471,7 @@ do_in_runtimepath(
     char	*opt_dir = "pack/*/opt/*/%s";
 
     if ((flags & DIP_NORTP) == 0)
-	done = do_in_path(p_rtp, name, flags, callback, cookie);
+	done = do_in_path(path, name, flags, callback, cookie);
 
     if ((done == FAIL || (flags & DIP_ALL)) && (flags & DIP_START))
     {
@@ -3471,6 +3497,42 @@ do_in_runtimepath(
 
     return done;
 }
+
+/*
+ * Just like do_in_path_and_pp(), using 'runtimepath' for "path".
+ */
+    int
+do_in_runtimepath(
+    char_u	*name,
+    int		flags,
+    void	(*callback)(char_u *fname, void *ck),
+    void	*cookie)
+{
+    return do_in_path_and_pp(p_rtp, name, flags, callback, cookie);
+}
+
+/*
+ * Source the file "name" from all directories in 'runtimepath'.
+ * "name" can contain wildcards.
+ * When "flags" has DIP_ALL: source all files, otherwise only the first one.
+ *
+ * return FAIL when no file could be sourced, OK otherwise.
+ */
+    int
+source_runtime(char_u *name, int flags)
+{
+    return source_in_path(p_rtp, name, flags);
+}
+
+/*
+ * Just like source_runtime(), but use "path" instead of 'runtimepath'.
+ */
+    int
+source_in_path(char_u *path, char_u *name, int flags)
+{
+    return do_in_path_and_pp(path, name, flags, source_callback, NULL);
+}
+
 
 /*
  * Expand wildcards in "pat" and invoke do_source() for each match.
@@ -3509,6 +3571,9 @@ add_pack_plugin(char_u *fname, void *cookie)
     size_t  afterlen = 0;
     char_u  *ffname = fix_fname(fname);
     size_t  fname_len;
+    char_u  *buf = NULL;
+    char_u  *rtp_ffname;
+    int	    match;
 
     if (ffname == NULL)
 	return;
@@ -3516,7 +3581,7 @@ add_pack_plugin(char_u *fname, void *cookie)
     {
 	/* directory is not yet in 'runtimepath', add it */
 	p4 = p3 = p2 = p1 = get_past_head(ffname);
-	for (p = p1; *p; mb_ptr_adv(p))
+	for (p = p1; *p; MB_PTR_ADV(p))
 	    if (vim_ispathsep_nocolon(*p))
 	    {
 		p4 = p3; p3 = p2; p2 = p1; p1 = p;
@@ -3533,26 +3598,28 @@ add_pack_plugin(char_u *fname, void *cookie)
 	/* Find "ffname" in "p_rtp", ignoring '/' vs '\' differences. */
 	fname_len = STRLEN(ffname);
 	insp = p_rtp;
-	for (;;)
+	buf = alloc(MAXPATHL);
+	if (buf == NULL)
+	    goto theend;
+	while (*insp != NUL)
 	{
-	    if (vim_fnamencmp(insp, ffname, fname_len) == 0)
+	    copy_option_part(&insp, buf, MAXPATHL, ",");
+	    add_pathsep(buf);
+	    rtp_ffname = fix_fname(buf);
+	    if (rtp_ffname == NULL)
+		goto theend;
+	    match = vim_fnamencmp(rtp_ffname, ffname, fname_len) == 0;
+	    vim_free(rtp_ffname);
+	    if (match)
 		break;
-	    insp = vim_strchr(insp, ',');
-	    if (insp == NULL)
-		break;
-	    ++insp;
 	}
 
-	if (insp == NULL)
+	if (*insp == NUL)
 	    /* not found, append at the end */
 	    insp = p_rtp + STRLEN(p_rtp);
 	else
-	{
 	    /* append after the matching directory. */
-	    insp += STRLEN(ffname);
-	    while (*insp != NUL && *insp != ',')
-		++insp;
-	}
+	    --insp;
 	*p4 = c;
 
 	/* check if rtp/pack/name/start/name/after exists */
@@ -3562,7 +3629,8 @@ add_pack_plugin(char_u *fname, void *cookie)
 
 	oldlen = STRLEN(p_rtp);
 	addlen = STRLEN(ffname) + 1; /* add one for comma */
-	new_rtp = alloc((int)(oldlen + addlen + afterlen + 1)); /* add one for NUL */
+	new_rtp = alloc((int)(oldlen + addlen + afterlen + 1));
+							  /* add one for NUL */
 	if (new_rtp == NULL)
 	    goto theend;
 	keep = (int)(insp - p_rtp);
@@ -3616,30 +3684,45 @@ add_pack_plugin(char_u *fname, void *cookie)
     }
 
 theend:
+    vim_free(buf);
     vim_free(ffname);
 }
 
-static int did_source_packages = FALSE;
+/*
+ * Add all packages in the "start" directory to 'runtimepath'.
+ */
+    void
+add_pack_start_dirs(void)
+{
+    do_in_path(p_pp, (char_u *)"pack/*/start/*", DIP_ALL + DIP_DIR,
+					       add_pack_plugin, &APP_ADD_DIR);
+}
+
+/*
+ * Load plugins from all packages in the "start" directory.
+ */
+    void
+load_start_packages(void)
+{
+    did_source_packages = TRUE;
+    do_in_path(p_pp, (char_u *)"pack/*/start/*", DIP_ALL + DIP_DIR,
+						  add_pack_plugin, &APP_LOAD);
+}
 
 /*
  * ":packloadall"
  * Find plugins in the package directories and source them.
- * "eap" is NULL when invoked during startup.
  */
     void
 ex_packloadall(exarg_T *eap)
 {
-    if (!did_source_packages || (eap != NULL && eap->forceit))
+    if (!did_source_packages || eap->forceit)
     {
-	did_source_packages = TRUE;
-
 	/* First do a round to add all directories to 'runtimepath', then load
 	 * the plugins. This allows for plugins to use an autoload directory
 	 * of another plugin. */
-	do_in_path(p_pp, (char_u *)"pack/*/start/*", DIP_ALL + DIP_DIR,
-					       add_pack_plugin, &APP_ADD_DIR);
-	do_in_path(p_pp, (char_u *)"pack/*/start/*", DIP_ALL + DIP_DIR,
-						  add_pack_plugin, &APP_LOAD);
+	add_pack_start_dirs();
+	load_start_packages();
     }
 }
 
@@ -3671,8 +3754,197 @@ ex_packadd(exarg_T *eap)
 ex_options(
     exarg_T	*eap UNUSED)
 {
+    vim_setenv((char_u *)"OPTWIN_CMD", (char_u *)(cmdmod.tab ? "tab" : ""));
     cmd_source((char_u *)SYS_OPTWIN_FILE, NULL);
 }
+#endif
+
+#if defined(FEAT_PYTHON3) || defined(FEAT_PYTHON) || defined(PROTO)
+
+# if (defined(FEAT_PYTHON) && defined(FEAT_PYTHON3)) || defined(PROTO)
+/*
+ * Detect Python 3 or 2, and initialize 'pyxversion'.
+ */
+    void
+init_pyxversion(void)
+{
+    if (p_pyx == 0)
+    {
+	if (python3_enabled(FALSE))
+	    p_pyx = 3;
+	else if (python_enabled(FALSE))
+	    p_pyx = 2;
+    }
+}
+# endif
+
+/*
+ * Does a file contain one of the following strings at the beginning of any
+ * line?
+ * "#!(any string)python2"  => returns 2
+ * "#!(any string)python3"  => returns 3
+ * "# requires python 2.x"  => returns 2
+ * "# requires python 3.x"  => returns 3
+ * otherwise return 0.
+ */
+    static int
+requires_py_version(char_u *filename)
+{
+    FILE    *file;
+    int	    requires_py_version = 0;
+    int	    i, lines;
+
+    lines = (int)p_mls;
+    if (lines < 0)
+	lines = 5;
+
+    file = mch_fopen((char *)filename, "r");
+    if (file != NULL)
+    {
+	for (i = 0; i < lines; i++)
+	{
+	    if (vim_fgets(IObuff, IOSIZE, file))
+		break;
+	    if (i == 0 && IObuff[0] == '#' && IObuff[1] == '!')
+	    {
+		/* Check shebang. */
+		if (strstr((char *)IObuff + 2, "python2") != NULL)
+		{
+		    requires_py_version = 2;
+		    break;
+		}
+		if (strstr((char *)IObuff + 2, "python3") != NULL)
+		{
+		    requires_py_version = 3;
+		    break;
+		}
+	    }
+	    IObuff[21] = '\0';
+	    if (STRCMP("# requires python 2.x", IObuff) == 0)
+	    {
+		requires_py_version = 2;
+		break;
+	    }
+	    if (STRCMP("# requires python 3.x", IObuff) == 0)
+	    {
+		requires_py_version = 3;
+		break;
+	    }
+	}
+	fclose(file);
+    }
+    return requires_py_version;
+}
+
+
+/*
+ * Source a python file using the requested python version.
+ */
+    static void
+source_pyx_file(exarg_T *eap, char_u *fname)
+{
+    exarg_T ex;
+    int	    v = requires_py_version(fname);
+
+# if defined(FEAT_PYTHON) && defined(FEAT_PYTHON3)
+    init_pyxversion();
+# endif
+    if (v == 0)
+    {
+# if defined(FEAT_PYTHON) && defined(FEAT_PYTHON3)
+	/* user didn't choose a preference, 'pyx' is used */
+	v = p_pyx;
+# elif defined(FEAT_PYTHON)
+	v = 2;
+# elif defined(FEAT_PYTHON3)
+	v = 3;
+# endif
+    }
+
+    /*
+     * now source, if required python version is not supported show
+     * unobtrusive message.
+     */
+    if (eap == NULL)
+	vim_memset(&ex, 0, sizeof(ex));
+    else
+	ex = *eap;
+    ex.arg = fname;
+    ex.cmd = (char_u *)(v == 2 ? "pyfile" : "pyfile3");
+
+    if (v == 2)
+    {
+# ifdef FEAT_PYTHON
+	ex_pyfile(&ex);
+# else
+	vim_snprintf((char *)IObuff, IOSIZE,
+		_("W20: Required python version 2.x not supported, ignoring file: %s"),
+		fname);
+	MSG(IObuff);
+# endif
+	return;
+    }
+    else
+    {
+# ifdef FEAT_PYTHON3
+	ex_py3file(&ex);
+# else
+	vim_snprintf((char *)IObuff, IOSIZE,
+		_("W21: Required python version 3.x not supported, ignoring file: %s"),
+		fname);
+	MSG(IObuff);
+# endif
+	return;
+    }
+}
+
+/*
+ * ":pyxfile {fname}"
+ */
+    void
+ex_pyxfile(exarg_T *eap)
+{
+    source_pyx_file(eap, eap->arg);
+}
+
+/*
+ * ":pyx"
+ */
+    void
+ex_pyx(exarg_T *eap)
+{
+# if defined(FEAT_PYTHON) && defined(FEAT_PYTHON3)
+    init_pyxversion();
+    if (p_pyx == 2)
+	ex_python(eap);
+    else
+	ex_py3(eap);
+# elif defined(FEAT_PYTHON)
+    ex_python(eap);
+# elif defined(FEAT_PYTHON3)
+    ex_py3(eap);
+# endif
+}
+
+/*
+ * ":pyxdo"
+ */
+    void
+ex_pyxdo(exarg_T *eap)
+{
+# if defined(FEAT_PYTHON) && defined(FEAT_PYTHON3)
+    init_pyxversion();
+    if (p_pyx == 2)
+	ex_pydo(eap);
+    else
+	ex_py3do(eap);
+# elif defined(FEAT_PYTHON)
+    ex_pydo(eap);
+# elif defined(FEAT_PYTHON3)
+    ex_py3do(eap);
+# endif
+}
+
 #endif
 
 /*
@@ -4531,7 +4803,7 @@ get_one_sourceline(struct source_cookie *sp)
 		{
 		    if (!sp->error)
 		    {
-			msg_source(hl_attr(HLF_W));
+			msg_source(HL_ATTR(HLF_W));
 			EMSG(_("W15: Warning: Wrong line separator, ^M may be missing"));
 		    }
 		    sp->error = TRUE;
@@ -4981,7 +5253,7 @@ ex_language(exarg_T *eap)
      * Allow abbreviation, but require at least 3 characters to avoid
      * confusion with a two letter language name "me" or "ct". */
     p = skiptowhite(eap->arg);
-    if ((*p == NUL || vim_iswhite(*p)) && p - eap->arg >= 3)
+    if ((*p == NUL || VIM_ISWHITE(*p)) && p - eap->arg >= 3)
     {
 	if (STRNICMP(eap->arg, "messages", p - eap->arg) == 0)
 	{
@@ -5091,23 +5363,9 @@ ex_language(exarg_T *eap)
 # if defined(FEAT_CMDL_COMPL) || defined(PROTO)
 
 static char_u	**locales = NULL;	/* Array of all available locales */
+
+#  ifndef WIN32
 static int	did_init_locales = FALSE;
-
-static void init_locales(void);
-static char_u **find_locales(void);
-
-/*
- * Lazy initialization of all available locales.
- */
-    static void
-init_locales(void)
-{
-    if (!did_init_locales)
-    {
-	did_init_locales = TRUE;
-	locales = find_locales();
-    }
-}
 
 /* Return an array of strings for all available locales + NULL for the
  * last element.  Return NULL in case of error. */
@@ -5148,6 +5406,22 @@ find_locales(void)
     }
     ((char_u **)locales_ga.ga_data)[locales_ga.ga_len] = NULL;
     return (char_u **)locales_ga.ga_data;
+}
+#  endif
+
+/*
+ * Lazy initialization of all available locales.
+ */
+    static void
+init_locales(void)
+{
+#  ifndef WIN32
+    if (!did_init_locales)
+    {
+	did_init_locales = TRUE;
+	locales = find_locales();
+    }
+#  endif
 }
 
 #  if defined(EXITFREE) || defined(PROTO)

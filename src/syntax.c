@@ -22,6 +22,7 @@ struct hl_group
 {
     char_u	*sg_name;	/* highlight group name */
     char_u	*sg_name_u;	/* uppercase of sg_name */
+    int		sg_cleared;	/* "hi clear" was used */
 /* for normal terminals */
     int		sg_term;	/* "term=" highlighting attributes */
     char_u	*sg_start;	/* terminal string for start highl */
@@ -85,9 +86,10 @@ static int include_link = 0;	/* when 2 include "link" and "clear" */
  */
 static char *(hl_name_table[]) =
     {"bold", "standout", "underline", "undercurl",
-				      "italic", "reverse", "inverse", "NONE"};
+			  "italic", "reverse", "inverse", "nocombine", "NONE"};
 static int hl_attr_table[] =
-    {HL_BOLD, HL_STANDOUT, HL_UNDERLINE, HL_UNDERCURL, HL_ITALIC, HL_INVERSE, HL_INVERSE, 0};
+    {HL_BOLD, HL_STANDOUT, HL_UNDERLINE, HL_UNDERCURL, HL_ITALIC, HL_INVERSE, HL_INVERSE, HL_NOCOMBINE, 0};
+#define ATTR_COMBINE(attr_a, attr_b) ((((attr_b) & HL_NOCOMBINE) ? attr_b : (attr_a)) | (attr_b))
 
 static int get_attr_entry(garray_T *table, attrentry_T *aep);
 static void syn_unadd_group(void);
@@ -101,7 +103,6 @@ static void highlight_clear(int idx);
 
 #if defined(FEAT_GUI) || defined(FEAT_TERMGUICOLORS)
 static void gui_do_one_color(int idx, int do_menu, int do_tooltip);
-static guicolor_T color_name2handle(char_u *name);
 #endif
 #ifdef FEAT_GUI
 static int  set_group_colors(char_u *name, guicolor_T *fgp, guicolor_T *bgp, int do_menu, int use_norm, int do_tooltip);
@@ -366,6 +367,9 @@ static reg_extmatch_T *next_match_extmatch = NULL;
 static win_T	*syn_win;		/* current window for highlighting */
 static buf_T	*syn_buf;		/* current buffer for highlighting */
 static synblock_T *syn_block;		/* current buffer for highlighting */
+#ifdef FEAT_RELTIME
+static proftime_T *syn_tm;
+#endif
 static linenr_T current_lnum = 0;	/* lnum of current state */
 static colnr_T	current_col = 0;	/* column of current state */
 static int	current_state_stored = 0; /* TRUE if stored current state
@@ -462,7 +466,7 @@ static void syn_clear_keyword(int id, hashtab_T *ht);
 static void clear_keywtab(hashtab_T *ht);
 static void add_keyword(char_u *name, int id, int flags, short *cont_in_list, short *next_list, int conceal_char);
 static char_u *get_group_name(char_u *arg, char_u **name_end);
-static char_u *get_syn_options(char_u *arg, syn_opt_arg_T *opt, int *conceal_char);
+static char_u *get_syn_options(char_u *arg, syn_opt_arg_T *opt, int *conceal_char, int skip);
 static void syn_cmd_include(exarg_T *eap, int syncing);
 static void syn_cmd_iskeyword(exarg_T *eap, int syncing);
 static void syn_cmd_keyword(exarg_T *eap, int syncing);
@@ -481,7 +485,7 @@ static int syn_add_cluster(char_u *name);
 static void init_syn_patterns(void);
 static char_u *get_syn_pattern(char_u *arg, synpat_T *ci);
 static void syn_cmd_sync(exarg_T *eap, int syncing);
-static int get_id_list(char_u **arg, int keylen, short **list);
+static int get_id_list(char_u **arg, int keylen, short **list, int skip);
 static void syn_combine_list(short **clstr1, short **clstr2, int list_op);
 static void syn_incl_toplevel(int id, int *flagsp);
 
@@ -493,7 +497,7 @@ static void syn_incl_toplevel(int id, int *flagsp);
  * window.
  */
     void
-syntax_start(win_T *wp, linenr_T lnum)
+syntax_start(win_T *wp, linenr_T lnum, proftime_T *syntax_tm UNUSED)
 {
     synstate_T	*p;
     synstate_T	*last_valid = NULL;
@@ -502,7 +506,7 @@ syntax_start(win_T *wp, linenr_T lnum)
     linenr_T	parsed_lnum;
     linenr_T	first_stored;
     int		dist;
-    static int	changedtick = 0;	/* remember the last change ID */
+    static varnumber_T changedtick = 0;	/* remember the last change ID */
 
 #ifdef FEAT_CONCEAL
     current_sub_char = NUL;
@@ -515,14 +519,17 @@ syntax_start(win_T *wp, linenr_T lnum)
      */
     if (syn_block != wp->w_s
 	    || syn_buf != wp->w_buffer
-	    || changedtick != syn_buf->b_changedtick)
+	    || changedtick != CHANGEDTICK(syn_buf))
     {
 	invalidate_current_state();
 	syn_buf = wp->w_buffer;
 	syn_block = wp->w_s;
     }
-    changedtick = syn_buf->b_changedtick;
+    changedtick = CHANGEDTICK(syn_buf);
     syn_win = wp;
+#ifdef FEAT_RELTIME
+    syn_tm = syntax_tm;
+#endif
 
     /*
      * Allocate syntax stack when needed.
@@ -1054,6 +1061,9 @@ syn_start_line(void)
 
     next_match_idx = -1;
     ++current_line_id;
+#ifdef FEAT_CONCEAL
+    next_seqnr = 1;
+#endif
 }
 
 /*
@@ -1182,10 +1192,11 @@ syn_stack_free_block(synblock_T *block)
     void
 syn_stack_free_all(synblock_T *block)
 {
+#ifdef FEAT_FOLDING
     win_T	*wp;
+#endif
 
     syn_stack_free_block(block);
-
 
 #ifdef FEAT_FOLDING
     /* When using "syntax" fold method, must update all folds. */
@@ -1780,36 +1791,33 @@ syn_finish_line(
     stateitem_T	*cur_si;
     colnr_T	prev_current_col;
 
-    if (!current_finished)
+    while (!current_finished)
     {
-	while (!current_finished)
+	(void)syn_current_attr(syncing, FALSE, NULL, FALSE);
+	/*
+	 * When syncing, and found some item, need to check the item.
+	 */
+	if (syncing && current_state.ga_len)
 	{
-	    (void)syn_current_attr(syncing, FALSE, NULL, FALSE);
 	    /*
-	     * When syncing, and found some item, need to check the item.
+	     * Check for match with sync item.
 	     */
-	    if (syncing && current_state.ga_len)
-	    {
-		/*
-		 * Check for match with sync item.
-		 */
-		cur_si = &CUR_STATE(current_state.ga_len - 1);
-		if (cur_si->si_idx >= 0
-			&& (SYN_ITEMS(syn_block)[cur_si->si_idx].sp_flags
-					      & (HL_SYNC_HERE|HL_SYNC_THERE)))
-		    return TRUE;
+	    cur_si = &CUR_STATE(current_state.ga_len - 1);
+	    if (cur_si->si_idx >= 0
+		    && (SYN_ITEMS(syn_block)[cur_si->si_idx].sp_flags
+					  & (HL_SYNC_HERE|HL_SYNC_THERE)))
+		return TRUE;
 
-		/* syn_current_attr() will have skipped the check for an item
-		 * that ends here, need to do that now.  Be careful not to go
-		 * past the NUL. */
-		prev_current_col = current_col;
-		if (syn_getcurline()[current_col] != NUL)
-		    ++current_col;
-		check_state_ends();
-		current_col = prev_current_col;
-	    }
-	    ++current_col;
+	    /* syn_current_attr() will have skipped the check for an item
+	     * that ends here, need to do that now.  Be careful not to go
+	     * past the NUL. */
+	    prev_current_col = current_col;
+	    if (syn_getcurline()[current_col] != NUL)
+		++current_col;
+	    check_state_ends();
+	    current_col = prev_current_col;
 	}
+	++current_col;
     }
     return FALSE;
 }
@@ -1852,6 +1860,7 @@ get_syntax_attr(
 #endif
 #ifdef FEAT_CONCEAL
 	current_flags = 0;
+	current_seqnr = 0;
 #endif
 	return 0;
     }
@@ -2306,7 +2315,7 @@ syn_current_attr(
 	    {
 		line = syn_getcurline();
 		if (((current_next_flags & HL_SKIPWHITE)
-			    && vim_iswhite(line[current_col]))
+			    && VIM_ISWHITE(line[current_col]))
 			|| ((current_next_flags & HL_SKIPEMPTY)
 			    && *line == NUL))
 		    break;
@@ -2341,6 +2350,7 @@ syn_current_attr(
 #endif
 #ifdef FEAT_CONCEAL
     current_flags = 0;
+    current_seqnr = 0;
 #endif
     if (cur_si != NULL)
     {
@@ -3209,12 +3219,12 @@ syn_add_end_off(
 	if (off > 0)
 	{
 	    while (off-- > 0 && *p != NUL)
-		mb_ptr_adv(p);
+		MB_PTR_ADV(p);
 	}
 	else if (off < 0)
 	{
 	    while (off++ < 0 && base < p)
-		mb_ptr_back(base, p);
+		MB_PTR_BACK(base, p);
 	}
 	col = (int)(p - base);
     }
@@ -3263,12 +3273,12 @@ syn_add_start_off(
 	if (off > 0)
 	{
 	    while (off-- && *p != NUL)
-		mb_ptr_adv(p);
+		MB_PTR_ADV(p);
 	}
 	else if (off < 0)
 	{
 	    while (off++ && base < p)
-		mb_ptr_back(base, p);
+		MB_PTR_BACK(base, p);
 	}
 	col = (int)(p - base);
     }
@@ -3296,6 +3306,9 @@ syn_regexec(
     syn_time_T  *st UNUSED)
 {
     int r;
+#ifdef FEAT_RELTIME
+    int timed_out = FALSE;
+#endif
 #ifdef FEAT_PROFILE
     proftime_T	pt;
 
@@ -3304,7 +3317,13 @@ syn_regexec(
 #endif
 
     rmp->rmm_maxcol = syn_buf->b_p_smc;
-    r = vim_regexec_multi(rmp, syn_win, syn_buf, lnum, col, NULL);
+    r = vim_regexec_multi(rmp, syn_win, syn_buf, lnum, col,
+#ifdef FEAT_RELTIME
+	    syn_tm, &timed_out
+#else
+	    NULL, NULL
+#endif
+	    );
 
 #ifdef FEAT_PROFILE
     if (syn_time_on)
@@ -3317,6 +3336,10 @@ syn_regexec(
 	if (r > 0)
 	    ++st->match;
     }
+#endif
+#ifdef FEAT_RELTIME
+    if (timed_out)
+	syn_win->w_s->b_syn_slow = TRUE;
 #endif
 
     if (r > 0)
@@ -3331,7 +3354,7 @@ syn_regexec(
 /*
  * Check one position in a line for a matching keyword.
  * The caller must check if a keyword can start at startcol.
- * Return it's ID if found, 0 otherwise.
+ * Return its ID if found, 0 otherwise.
  */
     static int
 check_keyword_id(
@@ -3434,7 +3457,14 @@ syn_cmd_conceal(exarg_T *eap UNUSED, int syncing UNUSED)
 	return;
 
     next = skiptowhite(arg);
-    if (STRNICMP(arg, "on", 2) == 0 && next - arg == 2)
+    if (*arg == NUL)
+    {
+	if (curwin->w_s->b_syn_conceal)
+	    MSG(_("syntax conceal on"));
+	else
+	    MSG(_("syntax conceal off"));
+    }
+    else if (STRNICMP(arg, "on", 2) == 0 && next - arg == 2)
 	curwin->w_s->b_syn_conceal = TRUE;
     else if (STRNICMP(arg, "off", 3) == 0 && next - arg == 3)
 	curwin->w_s->b_syn_conceal = FALSE;
@@ -3457,7 +3487,14 @@ syn_cmd_case(exarg_T *eap, int syncing UNUSED)
 	return;
 
     next = skiptowhite(arg);
-    if (STRNICMP(arg, "match", 5) == 0 && next - arg == 5)
+    if (*arg == NUL)
+    {
+	if (curwin->w_s->b_syn_ic)
+	    MSG(_("syntax case ignore"));
+	else
+	    MSG(_("syntax case match"));
+    }
+    else if (STRNICMP(arg, "match", 5) == 0 && next - arg == 5)
 	curwin->w_s->b_syn_ic = FALSE;
     else if (STRNICMP(arg, "ignore", 6) == 0 && next - arg == 6)
 	curwin->w_s->b_syn_ic = TRUE;
@@ -3479,7 +3516,16 @@ syn_cmd_spell(exarg_T *eap, int syncing UNUSED)
 	return;
 
     next = skiptowhite(arg);
-    if (STRNICMP(arg, "toplevel", 8) == 0 && next - arg == 8)
+    if (*arg == NUL)
+    {
+	if (curwin->w_s->b_syn_spell == SYNSPL_TOP)
+	    MSG(_("syntax spell toplevel"));
+	else if (curwin->w_s->b_syn_spell == SYNSPL_NOTOP)
+	    MSG(_("syntax spell notoplevel"));
+	else
+	    MSG(_("syntax spell default"));
+    }
+    else if (STRNICMP(arg, "toplevel", 8) == 0 && next - arg == 8)
 	curwin->w_s->b_syn_spell = SYNSPL_TOP;
     else if (STRNICMP(arg, "notoplevel", 10) == 0 && next - arg == 10)
 	curwin->w_s->b_syn_spell = SYNSPL_NOTOP;
@@ -3553,9 +3599,15 @@ syntax_clear(synblock_T *block)
     int i;
 
     block->b_syn_error = FALSE;	    /* clear previous error */
+#ifdef FEAT_RELTIME
+    block->b_syn_slow = FALSE;	    /* clear previous timeout */
+#endif
     block->b_syn_ic = FALSE;	    /* Use case, by default */
     block->b_syn_spell = SYNSPL_DEFAULT; /* default spell checking */
     block->b_syn_containedin = FALSE;
+#ifdef FEAT_CONCEAL
+    block->b_syn_conceal = FALSE;
+#endif
 
     /* free the keywords */
     clear_keywtab(&block->b_keywtab);
@@ -4042,7 +4094,7 @@ syn_list_one(
 		    {0, NULL}
 		};
 
-    attr = hl_attr(HLF_D);		/* highlight like directories */
+    attr = HL_ATTR(HLF_D);		/* highlight like directories */
 
     /* list the keywords for "id" */
     if (!syncing)
@@ -4153,11 +4205,11 @@ syn_list_cluster(int id)
     if (SYN_CLSTR(curwin->w_s)[id].scl_list != NULL)
     {
 	put_id_list((char_u *)"cluster", SYN_CLSTR(curwin->w_s)[id].scl_list,
-		    hl_attr(HLF_D));
+		    HL_ATTR(HLF_D));
     }
     else
     {
-	msg_puts_attr((char_u *)"cluster", hl_attr(HLF_D));
+	msg_puts_attr((char_u *)"cluster", HL_ATTR(HLF_D));
 	msg_puts((char_u *)"=NONE");
     }
 }
@@ -4543,7 +4595,8 @@ get_group_name(
 get_syn_options(
     char_u	    *arg,		/* next argument to be checked */
     syn_opt_arg_T   *opt,		/* various things */
-    int		    *conceal_char UNUSED)
+    int		    *conceal_char UNUSED,
+    int		    skip)		/* TRUE if skipping over command */
 {
     char_u	*gname_start, *gname;
     int		syn_id;
@@ -4602,7 +4655,7 @@ get_syn_options(
 	    for (i = 0, len = 0; p[i] != NUL; i += 2, ++len)
 		if (arg[len] != p[i] && arg[len] != p[i + 1])
 		    break;
-	    if (p[i] == NUL && (vim_iswhite(arg[len])
+	    if (p[i] == NUL && (VIM_ISWHITE(arg[len])
 				    || (flagtab[fidx].argtype > 0
 					 ? arg[len] == '='
 					 : ends_excmd(arg[len]))))
@@ -4626,17 +4679,17 @@ get_syn_options(
 		EMSG(_("E395: contains argument not accepted here"));
 		return NULL;
 	    }
-	    if (get_id_list(&arg, 8, &opt->cont_list) == FAIL)
+	    if (get_id_list(&arg, 8, &opt->cont_list, skip) == FAIL)
 		return NULL;
 	}
 	else if (flagtab[fidx].argtype == 2)
 	{
-	    if (get_id_list(&arg, 11, &opt->cont_in_list) == FAIL)
+	    if (get_id_list(&arg, 11, &opt->cont_in_list, skip) == FAIL)
 		return NULL;
 	}
 	else if (flagtab[fidx].argtype == 3)
 	{
-	    if (get_id_list(&arg, 9, &opt->next_list) == FAIL)
+	    if (get_id_list(&arg, 9, &opt->next_list, skip) == FAIL)
 		return NULL;
 	}
 	else if (flagtab[fidx].argtype == 11 && arg[5] == '=')
@@ -4846,7 +4899,10 @@ syn_cmd_keyword(exarg_T *eap, int syncing UNUSED)
 
     if (rest != NULL)
     {
-	syn_id = syn_check_group(arg, (int)(group_name_end - arg));
+	if (eap->skip)
+	    syn_id = -1;
+	else
+	    syn_id = syn_check_group(arg, (int)(group_name_end - arg));
 	if (syn_id != 0)
 	    /* allocate a buffer, for removing backslashes in the keyword */
 	    keyword_copy = alloc((unsigned)STRLEN(rest) + 1);
@@ -4868,11 +4924,12 @@ syn_cmd_keyword(exarg_T *eap, int syncing UNUSED)
 	    p = keyword_copy;
 	    for ( ; rest != NULL && !ends_excmd(*rest); rest = skipwhite(rest))
 	    {
-		rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
+		rest = get_syn_options(rest, &syn_opt_arg, &conceal_char,
+								    eap->skip);
 		if (rest == NULL || ends_excmd(*rest))
 		    break;
 		/* Copy the keyword, removing backslashes, and add a NUL. */
-		while (*rest != NUL && !vim_iswhite(*rest))
+		while (*rest != NUL && !VIM_ISWHITE(*rest))
 		{
 		    if (*rest == '\\' && rest[1] != NUL)
 			++rest;
@@ -4981,7 +5038,7 @@ syn_cmd_match(
     syn_opt_arg.cont_list = NULL;
     syn_opt_arg.cont_in_list = NULL;
     syn_opt_arg.next_list = NULL;
-    rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
+    rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
 
     /* get the pattern. */
     init_syn_patterns();
@@ -4991,7 +5048,7 @@ syn_cmd_match(
 	syn_opt_arg.flags |= HL_HAS_EOL;
 
     /* Get options after the pattern */
-    rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
+    rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
 
     if (rest != NULL)		/* all arguments are valid */
     {
@@ -5117,13 +5174,13 @@ syn_cmd_region(
     while (rest != NULL && !ends_excmd(*rest))
     {
 	/* Check for option arguments */
-	rest = get_syn_options(rest, &syn_opt_arg, &conceal_char);
+	rest = get_syn_options(rest, &syn_opt_arg, &conceal_char, eap->skip);
 	if (rest == NULL || ends_excmd(*rest))
 	    break;
 
 	/* must be a pattern or matchgroup then */
 	key_end = rest;
-	while (*key_end && !vim_iswhite(*key_end) && *key_end != '=')
+	while (*key_end && !VIM_ISWHITE(*key_end) && *key_end != '=')
 	    ++key_end;
 	vim_free(key);
 	key = vim_strnsave_up(rest, (int)(key_end - rest));
@@ -5462,7 +5519,7 @@ syn_combine_list(short **clstr1, short **clstr2, int list_op)
 }
 
 /*
- * Lookup a syntax cluster name and return it's ID.
+ * Lookup a syntax cluster name and return its ID.
  * If it is not found, 0 is returned.
  */
     static int
@@ -5502,7 +5559,7 @@ syn_scl_namen2id(char_u *linep, int len)
 }
 
 /*
- * Find syntax cluster name in the table and return it's ID.
+ * Find syntax cluster name in the table and return its ID.
  * The argument is a pointer to the name and the length of the name.
  * If it doesn't exist yet, a new entry is created.
  * Return 0 for failure.
@@ -5526,7 +5583,7 @@ syn_check_cluster(char_u *pp, int len)
 }
 
 /*
- * Add new syntax cluster and return it's ID.
+ * Add new syntax cluster and return its ID.
  * "name" must be an allocated string, it will be consumed.
  * Return 0 for failure.
  */
@@ -5607,19 +5664,19 @@ syn_cmd_cluster(exarg_T *eap, int syncing UNUSED)
 	for (;;)
 	{
 	    if (STRNICMP(rest, "add", 3) == 0
-		    && (vim_iswhite(rest[3]) || rest[3] == '='))
+		    && (VIM_ISWHITE(rest[3]) || rest[3] == '='))
 	    {
 		opt_len = 3;
 		list_op = CLUSTER_ADD;
 	    }
 	    else if (STRNICMP(rest, "remove", 6) == 0
-		    && (vim_iswhite(rest[6]) || rest[6] == '='))
+		    && (VIM_ISWHITE(rest[6]) || rest[6] == '='))
 	    {
 		opt_len = 6;
 		list_op = CLUSTER_SUBTRACT;
 	    }
 	    else if (STRNICMP(rest, "contains", 8) == 0
-			&& (vim_iswhite(rest[8]) || rest[8] == '='))
+			&& (VIM_ISWHITE(rest[8]) || rest[8] == '='))
 	    {
 		opt_len = 8;
 		list_op = CLUSTER_REPLACE;
@@ -5628,13 +5685,16 @@ syn_cmd_cluster(exarg_T *eap, int syncing UNUSED)
 		break;
 
 	    clstr_list = NULL;
-	    if (get_id_list(&rest, opt_len, &clstr_list) == FAIL)
+	    if (get_id_list(&rest, opt_len, &clstr_list, eap->skip) == FAIL)
 	    {
 		EMSG2(_(e_invarg2), rest);
 		break;
 	    }
-	    syn_combine_list(&SYN_CLSTR(curwin->w_s)[scl_id].scl_list,
+	    if (scl_id >= 0)
+		syn_combine_list(&SYN_CLSTR(curwin->w_s)[scl_id].scl_list,
 			     &clstr_list, list_op);
+	    else
+		vim_free(clstr_list);
 	    got_clstr = TRUE;
 	}
 
@@ -5757,7 +5817,7 @@ get_syn_pattern(char_u *arg, synpat_T *ci)
 	}
     } while (idx >= 0);
 
-    if (!ends_excmd(*end) && !vim_iswhite(*end))
+    if (!ends_excmd(*end) && !VIM_ISWHITE(*end))
     {
 	EMSG2(_("E402: Garbage after pattern: %s"), arg);
 	return NULL;
@@ -5931,8 +5991,9 @@ syn_cmd_sync(exarg_T *eap, int syncing UNUSED)
 get_id_list(
     char_u	**arg,
     int		keylen,		/* length of keyword */
-    short	**list)		/* where to store the resulting list, if not
+    short	**list,		/* where to store the resulting list, if not
 				   NULL, the list is silently skipped! */
+    int		skip)
 {
     char_u	*p = NULL;
     char_u	*end;
@@ -5977,7 +6038,7 @@ get_id_list(
 	count = 0;
 	while (!ends_excmd(*p))
 	{
-	    for (end = p; *end && !vim_iswhite(*end) && *end != ','; ++end)
+	    for (end = p; *end && !VIM_ISWHITE(*end) && *end != ','; ++end)
 		;
 	    name = alloc((int)(end - p + 3));	    /* leave room for "^$" */
 	    if (name == NULL)
@@ -6000,7 +6061,8 @@ get_id_list(
 		}
 		if (count != 0)
 		{
-		    EMSG2(_("E408: %s must be first in contains list"), name + 1);
+		    EMSG2(_("E408: %s must be first in contains list"),
+								     name + 1);
 		    failed = TRUE;
 		    vim_free(name);
 		    break;
@@ -6015,7 +6077,10 @@ get_id_list(
 	    }
 	    else if (name[1] == '@')
 	    {
-		id = syn_check_cluster(name + 2, (int)(end - p - 1));
+		if (skip)
+		    id = -1;
+		else
+		    id = syn_check_cluster(name + 2, (int)(end - p - 1));
 	    }
 	    else
 	    {
@@ -6383,7 +6448,9 @@ syntax_present(win_T *win)
 static enum
 {
     EXP_SUBCMD,	    /* expand ":syn" sub-commands */
-    EXP_CASE	    /* expand ":syn case" arguments */
+    EXP_CASE,	    /* expand ":syn case" arguments */
+    EXP_SPELL,	    /* expand ":syn spell" arguments */
+    EXP_SYNC	    /* expand ":syn sync" arguments */
 } expand_what;
 
 /*
@@ -6434,6 +6501,10 @@ set_context_in_syntax_cmd(expand_T *xp, char_u *arg)
 		xp->xp_context = EXPAND_NOTHING;
 	    else if (STRNICMP(arg, "case", p - arg) == 0)
 		expand_what = EXP_CASE;
+	    else if (STRNICMP(arg, "spell", p - arg) == 0)
+		expand_what = EXP_SPELL;
+	    else if (STRNICMP(arg, "sync", p - arg) == 0)
+		expand_what = EXP_SYNC;
 	    else if (  STRNICMP(arg, "keyword", p - arg) == 0
 		    || STRNICMP(arg, "region", p - arg) == 0
 		    || STRNICMP(arg, "match", p - arg) == 0
@@ -6445,8 +6516,6 @@ set_context_in_syntax_cmd(expand_T *xp, char_u *arg)
     }
 }
 
-static char *(case_args[]) = {"match", "ignore", NULL};
-
 /*
  * Function given to ExpandGeneric() to obtain the list syntax names for
  * expansion.
@@ -6454,9 +6523,31 @@ static char *(case_args[]) = {"match", "ignore", NULL};
     char_u *
 get_syntax_name(expand_T *xp UNUSED, int idx)
 {
-    if (expand_what == EXP_SUBCMD)
-	return (char_u *)subcommands[idx].name;
-    return (char_u *)case_args[idx];
+    switch (expand_what)
+    {
+	case EXP_SUBCMD:
+	    return (char_u *)subcommands[idx].name;
+	case EXP_CASE:
+	{
+	    static char *case_args[] = {"match", "ignore", NULL};
+	    return (char_u *)case_args[idx];
+	}
+	case EXP_SPELL:
+	{
+	    static char *spell_args[] =
+		{"toplevel", "notoplevel", "default", NULL};
+	    return (char_u *)spell_args[idx];
+	}
+	case EXP_SYNC:
+	{
+	    static char *sync_args[] =
+		{"ccomment", "clear", "fromstart",
+		 "linebreaks=", "linecont", "lines=", "match",
+		 "maxlines=", "minlines=", "region", NULL};
+	    return (char_u *)sync_args[idx];
+	}
+    }
+    return NULL;
 }
 
 #endif /* FEAT_CMDL_COMPL */
@@ -6478,7 +6569,7 @@ syn_get_id(
     if (wp->w_buffer != syn_buf
 	    || lnum != current_lnum
 	    || col < current_col)
-	syntax_start(wp, lnum);
+	syntax_start(wp, lnum, NULL);
     else if (wp->w_buffer == syn_buf
 	    && lnum == current_lnum
 	    && col > current_col)
@@ -6547,9 +6638,14 @@ syn_get_foldlevel(win_T *wp, long lnum)
     int		i;
 
     /* Return quickly when there are no fold items at all. */
-    if (wp->w_s->b_syn_folditems != 0)
+    if (wp->w_s->b_syn_folditems != 0
+	    && !wp->w_s->b_syn_error
+# ifdef SYN_TIME_LIMIT
+	    && !wp->w_s->b_syn_slow
+# endif
+	    )
     {
-	syntax_start(wp, lnum);
+	syntax_start(wp, lnum, NULL);
 
 	for (i = 0; i < current_state.ga_len; ++i)
 	    if (CUR_STATE(i).si_flags & HL_FOLD)
@@ -6704,8 +6800,10 @@ syntime_report(void)
 	}
     }
 
-    /* sort on total time */
-    qsort(ga.ga_data, (size_t)ga.ga_len, sizeof(time_entry_T),
+    /* Sort on total time. Skip if there are no items to avoid passing NULL
+     * pointer to qsort(). */
+    if (ga.ga_len > 1)
+	qsort(ga.ga_data, (size_t)ga.ga_len, sizeof(time_entry_T),
 							 syn_compare_syntime);
 
     MSG_PUTS_TITLE(_("  TOTAL      COUNT  MATCH   SLOWEST     AVERAGE   NAME               PATTERN"));
@@ -6775,225 +6873,237 @@ syntime_report(void)
 #else
 # define CENT(a, b) a
 #endif
-static char *(highlight_init_both[]) =
-    {
-	CENT("ErrorMsg term=standout ctermbg=DarkRed ctermfg=White",
-	     "ErrorMsg term=standout ctermbg=DarkRed ctermfg=White guibg=Red guifg=White"),
-	CENT("IncSearch term=reverse cterm=reverse",
-	     "IncSearch term=reverse cterm=reverse gui=reverse"),
-	CENT("ModeMsg term=bold cterm=bold",
-	     "ModeMsg term=bold cterm=bold gui=bold"),
-	CENT("NonText term=bold ctermfg=Blue",
-	     "NonText term=bold ctermfg=Blue gui=bold guifg=Blue"),
-	CENT("StatusLine term=reverse,bold cterm=reverse,bold",
-	     "StatusLine term=reverse,bold cterm=reverse,bold gui=reverse,bold"),
-	CENT("StatusLineNC term=reverse cterm=reverse",
-	     "StatusLineNC term=reverse cterm=reverse gui=reverse"),
-	"default link EndOfBuffer NonText",
+static char *(highlight_init_both[]) = {
+    CENT("ErrorMsg term=standout ctermbg=DarkRed ctermfg=White",
+	 "ErrorMsg term=standout ctermbg=DarkRed ctermfg=White guibg=Red guifg=White"),
+    CENT("IncSearch term=reverse cterm=reverse",
+	 "IncSearch term=reverse cterm=reverse gui=reverse"),
+    CENT("ModeMsg term=bold cterm=bold",
+	 "ModeMsg term=bold cterm=bold gui=bold"),
+    CENT("NonText term=bold ctermfg=Blue",
+	 "NonText term=bold ctermfg=Blue gui=bold guifg=Blue"),
+    CENT("StatusLine term=reverse,bold cterm=reverse,bold",
+	 "StatusLine term=reverse,bold cterm=reverse,bold gui=reverse,bold"),
+    CENT("StatusLineNC term=reverse cterm=reverse",
+	 "StatusLineNC term=reverse cterm=reverse gui=reverse"),
+    "default link EndOfBuffer NonText",
 #ifdef FEAT_WINDOWS
-	CENT("VertSplit term=reverse cterm=reverse",
-	     "VertSplit term=reverse cterm=reverse gui=reverse"),
+    CENT("VertSplit term=reverse cterm=reverse",
+	 "VertSplit term=reverse cterm=reverse gui=reverse"),
 #endif
 #ifdef FEAT_CLIPBOARD
-	CENT("VisualNOS term=underline,bold cterm=underline,bold",
-	     "VisualNOS term=underline,bold cterm=underline,bold gui=underline,bold"),
+    CENT("VisualNOS term=underline,bold cterm=underline,bold",
+	 "VisualNOS term=underline,bold cterm=underline,bold gui=underline,bold"),
 #endif
 #ifdef FEAT_DIFF
-	CENT("DiffText term=reverse cterm=bold ctermbg=Red",
-	     "DiffText term=reverse cterm=bold ctermbg=Red gui=bold guibg=Red"),
+    CENT("DiffText term=reverse cterm=bold ctermbg=Red",
+	 "DiffText term=reverse cterm=bold ctermbg=Red gui=bold guibg=Red"),
 #endif
 #ifdef FEAT_INS_EXPAND
-	CENT("PmenuSbar ctermbg=Grey",
-	     "PmenuSbar ctermbg=Grey guibg=Grey"),
+    CENT("PmenuSbar ctermbg=Grey",
+	 "PmenuSbar ctermbg=Grey guibg=Grey"),
 #endif
 #ifdef FEAT_WINDOWS
-	CENT("TabLineSel term=bold cterm=bold",
-	     "TabLineSel term=bold cterm=bold gui=bold"),
-	CENT("TabLineFill term=reverse cterm=reverse",
-	     "TabLineFill term=reverse cterm=reverse gui=reverse"),
+    CENT("TabLineSel term=bold cterm=bold",
+	 "TabLineSel term=bold cterm=bold gui=bold"),
+    CENT("TabLineFill term=reverse cterm=reverse",
+	 "TabLineFill term=reverse cterm=reverse gui=reverse"),
 #endif
 #ifdef FEAT_GUI
-	"Cursor guibg=fg guifg=bg",
-	"lCursor guibg=fg guifg=bg", /* should be different, but what? */
+    "Cursor guibg=fg guifg=bg",
+    "lCursor guibg=fg guifg=bg", /* should be different, but what? */
 #endif
-	NULL
-    };
+    "default link QuickFixLine Search",
+    NULL
+};
 
-static char *(highlight_init_light[]) =
-    {
-	CENT("Directory term=bold ctermfg=DarkBlue",
-	     "Directory term=bold ctermfg=DarkBlue guifg=Blue"),
-	CENT("LineNr term=underline ctermfg=Brown",
-	     "LineNr term=underline ctermfg=Brown guifg=Brown"),
-	CENT("CursorLineNr term=bold ctermfg=Brown",
-	     "CursorLineNr term=bold ctermfg=Brown gui=bold guifg=Brown"),
-	CENT("MoreMsg term=bold ctermfg=DarkGreen",
-	     "MoreMsg term=bold ctermfg=DarkGreen gui=bold guifg=SeaGreen"),
-	CENT("Question term=standout ctermfg=DarkGreen",
-	     "Question term=standout ctermfg=DarkGreen gui=bold guifg=SeaGreen"),
-	CENT("Search term=reverse ctermbg=Yellow ctermfg=NONE",
-	     "Search term=reverse ctermbg=Yellow ctermfg=NONE guibg=Yellow guifg=NONE"),
+/* Default colors only used with a light background. */
+static char *(highlight_init_light[]) = {
+    CENT("Directory term=bold ctermfg=DarkBlue",
+	 "Directory term=bold ctermfg=DarkBlue guifg=Blue"),
+    CENT("LineNr term=underline ctermfg=Brown",
+	 "LineNr term=underline ctermfg=Brown guifg=Brown"),
+    CENT("CursorLineNr term=bold ctermfg=Brown",
+	 "CursorLineNr term=bold ctermfg=Brown gui=bold guifg=Brown"),
+    CENT("MoreMsg term=bold ctermfg=DarkGreen",
+	 "MoreMsg term=bold ctermfg=DarkGreen gui=bold guifg=SeaGreen"),
+    CENT("Question term=standout ctermfg=DarkGreen",
+	 "Question term=standout ctermfg=DarkGreen gui=bold guifg=SeaGreen"),
+    CENT("Search term=reverse ctermbg=Yellow ctermfg=NONE",
+	 "Search term=reverse ctermbg=Yellow ctermfg=NONE guibg=Yellow guifg=NONE"),
 #ifdef FEAT_SPELL
-	CENT("SpellBad term=reverse ctermbg=LightRed",
-	     "SpellBad term=reverse ctermbg=LightRed guisp=Red gui=undercurl"),
-	CENT("SpellCap term=reverse ctermbg=LightBlue",
-	     "SpellCap term=reverse ctermbg=LightBlue guisp=Blue gui=undercurl"),
-	CENT("SpellRare term=reverse ctermbg=LightMagenta",
-	     "SpellRare term=reverse ctermbg=LightMagenta guisp=Magenta gui=undercurl"),
-	CENT("SpellLocal term=underline ctermbg=Cyan",
-	     "SpellLocal term=underline ctermbg=Cyan guisp=DarkCyan gui=undercurl"),
+    CENT("SpellBad term=reverse ctermbg=LightRed",
+	 "SpellBad term=reverse ctermbg=LightRed guisp=Red gui=undercurl"),
+    CENT("SpellCap term=reverse ctermbg=LightBlue",
+	 "SpellCap term=reverse ctermbg=LightBlue guisp=Blue gui=undercurl"),
+    CENT("SpellRare term=reverse ctermbg=LightMagenta",
+	 "SpellRare term=reverse ctermbg=LightMagenta guisp=Magenta gui=undercurl"),
+    CENT("SpellLocal term=underline ctermbg=Cyan",
+	 "SpellLocal term=underline ctermbg=Cyan guisp=DarkCyan gui=undercurl"),
 #endif
 #ifdef FEAT_INS_EXPAND
-	CENT("PmenuThumb ctermbg=Black",
-	     "PmenuThumb ctermbg=Black guibg=Black"),
-	CENT("Pmenu ctermbg=LightMagenta ctermfg=Black",
-	     "Pmenu ctermbg=LightMagenta ctermfg=Black guibg=LightMagenta"),
-	CENT("PmenuSel ctermbg=LightGrey ctermfg=Black",
-	     "PmenuSel ctermbg=LightGrey ctermfg=Black guibg=Grey"),
+    CENT("PmenuThumb ctermbg=Black",
+	 "PmenuThumb ctermbg=Black guibg=Black"),
+    CENT("Pmenu ctermbg=LightMagenta ctermfg=Black",
+	 "Pmenu ctermbg=LightMagenta ctermfg=Black guibg=LightMagenta"),
+    CENT("PmenuSel ctermbg=LightGrey ctermfg=Black",
+	 "PmenuSel ctermbg=LightGrey ctermfg=Black guibg=Grey"),
 #endif
-	CENT("SpecialKey term=bold ctermfg=DarkBlue",
-	     "SpecialKey term=bold ctermfg=DarkBlue guifg=Blue"),
-	CENT("Title term=bold ctermfg=DarkMagenta",
-	     "Title term=bold ctermfg=DarkMagenta gui=bold guifg=Magenta"),
-	CENT("WarningMsg term=standout ctermfg=DarkRed",
-	     "WarningMsg term=standout ctermfg=DarkRed guifg=Red"),
+    CENT("SpecialKey term=bold ctermfg=DarkBlue",
+	 "SpecialKey term=bold ctermfg=DarkBlue guifg=Blue"),
+    CENT("Title term=bold ctermfg=DarkMagenta",
+	 "Title term=bold ctermfg=DarkMagenta gui=bold guifg=Magenta"),
+    CENT("WarningMsg term=standout ctermfg=DarkRed",
+	 "WarningMsg term=standout ctermfg=DarkRed guifg=Red"),
 #ifdef FEAT_WILDMENU
-	CENT("WildMenu term=standout ctermbg=Yellow ctermfg=Black",
-	     "WildMenu term=standout ctermbg=Yellow ctermfg=Black guibg=Yellow guifg=Black"),
+    CENT("WildMenu term=standout ctermbg=Yellow ctermfg=Black",
+	 "WildMenu term=standout ctermbg=Yellow ctermfg=Black guibg=Yellow guifg=Black"),
 #endif
 #ifdef FEAT_FOLDING
-	CENT("Folded term=standout ctermbg=Grey ctermfg=DarkBlue",
-	     "Folded term=standout ctermbg=Grey ctermfg=DarkBlue guibg=LightGrey guifg=DarkBlue"),
-	CENT("FoldColumn term=standout ctermbg=Grey ctermfg=DarkBlue",
-	     "FoldColumn term=standout ctermbg=Grey ctermfg=DarkBlue guibg=Grey guifg=DarkBlue"),
+    CENT("Folded term=standout ctermbg=Grey ctermfg=DarkBlue",
+	 "Folded term=standout ctermbg=Grey ctermfg=DarkBlue guibg=LightGrey guifg=DarkBlue"),
+    CENT("FoldColumn term=standout ctermbg=Grey ctermfg=DarkBlue",
+	 "FoldColumn term=standout ctermbg=Grey ctermfg=DarkBlue guibg=Grey guifg=DarkBlue"),
 #endif
 #ifdef FEAT_SIGNS
-	CENT("SignColumn term=standout ctermbg=Grey ctermfg=DarkBlue",
-	     "SignColumn term=standout ctermbg=Grey ctermfg=DarkBlue guibg=Grey guifg=DarkBlue"),
+    CENT("SignColumn term=standout ctermbg=Grey ctermfg=DarkBlue",
+	 "SignColumn term=standout ctermbg=Grey ctermfg=DarkBlue guibg=Grey guifg=DarkBlue"),
 #endif
-	CENT("Visual term=reverse",
-	     "Visual term=reverse guibg=LightGrey"),
+    CENT("Visual term=reverse",
+	 "Visual term=reverse guibg=LightGrey"),
 #ifdef FEAT_DIFF
-	CENT("DiffAdd term=bold ctermbg=LightBlue",
-	     "DiffAdd term=bold ctermbg=LightBlue guibg=LightBlue"),
-	CENT("DiffChange term=bold ctermbg=LightMagenta",
-	     "DiffChange term=bold ctermbg=LightMagenta guibg=LightMagenta"),
-	CENT("DiffDelete term=bold ctermfg=Blue ctermbg=LightCyan",
-	     "DiffDelete term=bold ctermfg=Blue ctermbg=LightCyan gui=bold guifg=Blue guibg=LightCyan"),
+    CENT("DiffAdd term=bold ctermbg=LightBlue",
+	 "DiffAdd term=bold ctermbg=LightBlue guibg=LightBlue"),
+    CENT("DiffChange term=bold ctermbg=LightMagenta",
+	 "DiffChange term=bold ctermbg=LightMagenta guibg=LightMagenta"),
+    CENT("DiffDelete term=bold ctermfg=Blue ctermbg=LightCyan",
+	 "DiffDelete term=bold ctermfg=Blue ctermbg=LightCyan gui=bold guifg=Blue guibg=LightCyan"),
 #endif
 #ifdef FEAT_WINDOWS
-	CENT("TabLine term=underline cterm=underline ctermfg=black ctermbg=LightGrey",
-	     "TabLine term=underline cterm=underline ctermfg=black ctermbg=LightGrey gui=underline guibg=LightGrey"),
+    CENT("TabLine term=underline cterm=underline ctermfg=black ctermbg=LightGrey",
+	 "TabLine term=underline cterm=underline ctermfg=black ctermbg=LightGrey gui=underline guibg=LightGrey"),
 #endif
 #ifdef FEAT_SYN_HL
-	CENT("CursorColumn term=reverse ctermbg=LightGrey",
-	     "CursorColumn term=reverse ctermbg=LightGrey guibg=Grey90"),
-	CENT("CursorLine term=underline cterm=underline",
-	     "CursorLine term=underline cterm=underline guibg=Grey90"),
-	CENT("ColorColumn term=reverse ctermbg=LightRed",
-	     "ColorColumn term=reverse ctermbg=LightRed guibg=LightRed"),
+    CENT("CursorColumn term=reverse ctermbg=LightGrey",
+	 "CursorColumn term=reverse ctermbg=LightGrey guibg=Grey90"),
+    CENT("CursorLine term=underline cterm=underline",
+	 "CursorLine term=underline cterm=underline guibg=Grey90"),
+    CENT("ColorColumn term=reverse ctermbg=LightRed",
+	 "ColorColumn term=reverse ctermbg=LightRed guibg=LightRed"),
 #endif
 #ifdef FEAT_CONCEAL
-	CENT("Conceal ctermbg=DarkGrey ctermfg=LightGrey",
-	     "Conceal ctermbg=DarkGrey ctermfg=LightGrey guibg=DarkGrey guifg=LightGrey"),
+    CENT("Conceal ctermbg=DarkGrey ctermfg=LightGrey",
+	 "Conceal ctermbg=DarkGrey ctermfg=LightGrey guibg=DarkGrey guifg=LightGrey"),
 #endif
 #ifdef FEAT_AUTOCMD
-	CENT("MatchParen term=reverse ctermbg=Cyan",
-	     "MatchParen term=reverse ctermbg=Cyan guibg=Cyan"),
+    CENT("MatchParen term=reverse ctermbg=Cyan",
+	 "MatchParen term=reverse ctermbg=Cyan guibg=Cyan"),
 #endif
 #ifdef FEAT_GUI
-	"Normal gui=NONE",
+    "Normal gui=NONE",
 #endif
-	NULL
-    };
+#ifdef FEAT_TERMINAL
+    CENT("StatusLineTerm term=reverse,bold cterm=bold ctermfg=White ctermbg=DarkGreen",
+	 "StatusLineTerm term=reverse,bold cterm=bold ctermfg=White ctermbg=DarkGreen gui=bold guifg=bg guibg=DarkGreen"),
+    CENT("StatusLineTermNC term=reverse ctermfg=White ctermbg=DarkGreen",
+	 "StatusLineTermNC term=reverse ctermfg=White ctermbg=DarkGreen guifg=bg guibg=DarkGreen"),
+#endif
+    NULL
+};
 
-static char *(highlight_init_dark[]) =
-    {
-	CENT("Directory term=bold ctermfg=LightCyan",
-	     "Directory term=bold ctermfg=LightCyan guifg=Cyan"),
-	CENT("LineNr term=underline ctermfg=Yellow",
-	     "LineNr term=underline ctermfg=Yellow guifg=Yellow"),
-	CENT("CursorLineNr term=bold ctermfg=Yellow",
-	     "CursorLineNr term=bold ctermfg=Yellow gui=bold guifg=Yellow"),
-	CENT("MoreMsg term=bold ctermfg=LightGreen",
-	     "MoreMsg term=bold ctermfg=LightGreen gui=bold guifg=SeaGreen"),
-	CENT("Question term=standout ctermfg=LightGreen",
-	     "Question term=standout ctermfg=LightGreen gui=bold guifg=Green"),
-	CENT("Search term=reverse ctermbg=Yellow ctermfg=Black",
-	     "Search term=reverse ctermbg=Yellow ctermfg=Black guibg=Yellow guifg=Black"),
-	CENT("SpecialKey term=bold ctermfg=LightBlue",
-	     "SpecialKey term=bold ctermfg=LightBlue guifg=Cyan"),
+/* Default colors only used with a dark background. */
+static char *(highlight_init_dark[]) = {
+    CENT("Directory term=bold ctermfg=LightCyan",
+	 "Directory term=bold ctermfg=LightCyan guifg=Cyan"),
+    CENT("LineNr term=underline ctermfg=Yellow",
+	 "LineNr term=underline ctermfg=Yellow guifg=Yellow"),
+    CENT("CursorLineNr term=bold ctermfg=Yellow",
+	 "CursorLineNr term=bold ctermfg=Yellow gui=bold guifg=Yellow"),
+    CENT("MoreMsg term=bold ctermfg=LightGreen",
+	 "MoreMsg term=bold ctermfg=LightGreen gui=bold guifg=SeaGreen"),
+    CENT("Question term=standout ctermfg=LightGreen",
+	 "Question term=standout ctermfg=LightGreen gui=bold guifg=Green"),
+    CENT("Search term=reverse ctermbg=Yellow ctermfg=Black",
+	 "Search term=reverse ctermbg=Yellow ctermfg=Black guibg=Yellow guifg=Black"),
+    CENT("SpecialKey term=bold ctermfg=LightBlue",
+	 "SpecialKey term=bold ctermfg=LightBlue guifg=Cyan"),
 #ifdef FEAT_SPELL
-	CENT("SpellBad term=reverse ctermbg=Red",
-	     "SpellBad term=reverse ctermbg=Red guisp=Red gui=undercurl"),
-	CENT("SpellCap term=reverse ctermbg=Blue",
-	     "SpellCap term=reverse ctermbg=Blue guisp=Blue gui=undercurl"),
-	CENT("SpellRare term=reverse ctermbg=Magenta",
-	     "SpellRare term=reverse ctermbg=Magenta guisp=Magenta gui=undercurl"),
-	CENT("SpellLocal term=underline ctermbg=Cyan",
-	     "SpellLocal term=underline ctermbg=Cyan guisp=Cyan gui=undercurl"),
+    CENT("SpellBad term=reverse ctermbg=Red",
+	 "SpellBad term=reverse ctermbg=Red guisp=Red gui=undercurl"),
+    CENT("SpellCap term=reverse ctermbg=Blue",
+	 "SpellCap term=reverse ctermbg=Blue guisp=Blue gui=undercurl"),
+    CENT("SpellRare term=reverse ctermbg=Magenta",
+	 "SpellRare term=reverse ctermbg=Magenta guisp=Magenta gui=undercurl"),
+    CENT("SpellLocal term=underline ctermbg=Cyan",
+	 "SpellLocal term=underline ctermbg=Cyan guisp=Cyan gui=undercurl"),
 #endif
 #ifdef FEAT_INS_EXPAND
-	CENT("PmenuThumb ctermbg=White",
-	     "PmenuThumb ctermbg=White guibg=White"),
-	CENT("Pmenu ctermbg=Magenta ctermfg=Black",
-	     "Pmenu ctermbg=Magenta ctermfg=Black guibg=Magenta"),
-	CENT("PmenuSel ctermbg=Black ctermfg=DarkGrey",
-	     "PmenuSel ctermbg=Black ctermfg=DarkGrey guibg=DarkGrey"),
+    CENT("PmenuThumb ctermbg=White",
+	 "PmenuThumb ctermbg=White guibg=White"),
+    CENT("Pmenu ctermbg=Magenta ctermfg=Black",
+	 "Pmenu ctermbg=Magenta ctermfg=Black guibg=Magenta"),
+    CENT("PmenuSel ctermbg=Black ctermfg=DarkGrey",
+	 "PmenuSel ctermbg=Black ctermfg=DarkGrey guibg=DarkGrey"),
 #endif
-	CENT("Title term=bold ctermfg=LightMagenta",
-	     "Title term=bold ctermfg=LightMagenta gui=bold guifg=Magenta"),
-	CENT("WarningMsg term=standout ctermfg=LightRed",
-	     "WarningMsg term=standout ctermfg=LightRed guifg=Red"),
+    CENT("Title term=bold ctermfg=LightMagenta",
+	 "Title term=bold ctermfg=LightMagenta gui=bold guifg=Magenta"),
+    CENT("WarningMsg term=standout ctermfg=LightRed",
+	 "WarningMsg term=standout ctermfg=LightRed guifg=Red"),
 #ifdef FEAT_WILDMENU
-	CENT("WildMenu term=standout ctermbg=Yellow ctermfg=Black",
-	     "WildMenu term=standout ctermbg=Yellow ctermfg=Black guibg=Yellow guifg=Black"),
+    CENT("WildMenu term=standout ctermbg=Yellow ctermfg=Black",
+	 "WildMenu term=standout ctermbg=Yellow ctermfg=Black guibg=Yellow guifg=Black"),
 #endif
 #ifdef FEAT_FOLDING
-	CENT("Folded term=standout ctermbg=DarkGrey ctermfg=Cyan",
-	     "Folded term=standout ctermbg=DarkGrey ctermfg=Cyan guibg=DarkGrey guifg=Cyan"),
-	CENT("FoldColumn term=standout ctermbg=DarkGrey ctermfg=Cyan",
-	     "FoldColumn term=standout ctermbg=DarkGrey ctermfg=Cyan guibg=Grey guifg=Cyan"),
+    CENT("Folded term=standout ctermbg=DarkGrey ctermfg=Cyan",
+	 "Folded term=standout ctermbg=DarkGrey ctermfg=Cyan guibg=DarkGrey guifg=Cyan"),
+    CENT("FoldColumn term=standout ctermbg=DarkGrey ctermfg=Cyan",
+	 "FoldColumn term=standout ctermbg=DarkGrey ctermfg=Cyan guibg=Grey guifg=Cyan"),
 #endif
 #ifdef FEAT_SIGNS
-	CENT("SignColumn term=standout ctermbg=DarkGrey ctermfg=Cyan",
-	     "SignColumn term=standout ctermbg=DarkGrey ctermfg=Cyan guibg=Grey guifg=Cyan"),
+    CENT("SignColumn term=standout ctermbg=DarkGrey ctermfg=Cyan",
+	 "SignColumn term=standout ctermbg=DarkGrey ctermfg=Cyan guibg=Grey guifg=Cyan"),
 #endif
-	CENT("Visual term=reverse",
-	     "Visual term=reverse guibg=DarkGrey"),
+    CENT("Visual term=reverse",
+	 "Visual term=reverse guibg=DarkGrey"),
 #ifdef FEAT_DIFF
-	CENT("DiffAdd term=bold ctermbg=DarkBlue",
-	     "DiffAdd term=bold ctermbg=DarkBlue guibg=DarkBlue"),
-	CENT("DiffChange term=bold ctermbg=DarkMagenta",
-	     "DiffChange term=bold ctermbg=DarkMagenta guibg=DarkMagenta"),
-	CENT("DiffDelete term=bold ctermfg=Blue ctermbg=DarkCyan",
-	     "DiffDelete term=bold ctermfg=Blue ctermbg=DarkCyan gui=bold guifg=Blue guibg=DarkCyan"),
+    CENT("DiffAdd term=bold ctermbg=DarkBlue",
+	 "DiffAdd term=bold ctermbg=DarkBlue guibg=DarkBlue"),
+    CENT("DiffChange term=bold ctermbg=DarkMagenta",
+	 "DiffChange term=bold ctermbg=DarkMagenta guibg=DarkMagenta"),
+    CENT("DiffDelete term=bold ctermfg=Blue ctermbg=DarkCyan",
+	 "DiffDelete term=bold ctermfg=Blue ctermbg=DarkCyan gui=bold guifg=Blue guibg=DarkCyan"),
 #endif
 #ifdef FEAT_WINDOWS
-	CENT("TabLine term=underline cterm=underline ctermfg=white ctermbg=DarkGrey",
-	     "TabLine term=underline cterm=underline ctermfg=white ctermbg=DarkGrey gui=underline guibg=DarkGrey"),
+    CENT("TabLine term=underline cterm=underline ctermfg=white ctermbg=DarkGrey",
+	 "TabLine term=underline cterm=underline ctermfg=white ctermbg=DarkGrey gui=underline guibg=DarkGrey"),
 #endif
 #ifdef FEAT_SYN_HL
-	CENT("CursorColumn term=reverse ctermbg=DarkGrey",
-	     "CursorColumn term=reverse ctermbg=DarkGrey guibg=Grey40"),
-	CENT("CursorLine term=underline cterm=underline",
-	     "CursorLine term=underline cterm=underline guibg=Grey40"),
-	CENT("ColorColumn term=reverse ctermbg=DarkRed",
-	     "ColorColumn term=reverse ctermbg=DarkRed guibg=DarkRed"),
+    CENT("CursorColumn term=reverse ctermbg=DarkGrey",
+	 "CursorColumn term=reverse ctermbg=DarkGrey guibg=Grey40"),
+    CENT("CursorLine term=underline cterm=underline",
+	 "CursorLine term=underline cterm=underline guibg=Grey40"),
+    CENT("ColorColumn term=reverse ctermbg=DarkRed",
+	 "ColorColumn term=reverse ctermbg=DarkRed guibg=DarkRed"),
 #endif
 #ifdef FEAT_AUTOCMD
-	CENT("MatchParen term=reverse ctermbg=DarkCyan",
-	     "MatchParen term=reverse ctermbg=DarkCyan guibg=DarkCyan"),
+    CENT("MatchParen term=reverse ctermbg=DarkCyan",
+	 "MatchParen term=reverse ctermbg=DarkCyan guibg=DarkCyan"),
 #endif
 #ifdef FEAT_CONCEAL
-	CENT("Conceal ctermbg=DarkGrey ctermfg=LightGrey",
-	     "Conceal ctermbg=DarkGrey ctermfg=LightGrey guibg=DarkGrey guifg=LightGrey"),
+    CENT("Conceal ctermbg=DarkGrey ctermfg=LightGrey",
+	 "Conceal ctermbg=DarkGrey ctermfg=LightGrey guibg=DarkGrey guifg=LightGrey"),
 #endif
 #ifdef FEAT_GUI
-	"Normal gui=NONE",
+    "Normal gui=NONE",
 #endif
-	NULL
-    };
+#ifdef FEAT_TERMINAL
+    CENT("StatusLineTerm term=reverse,bold cterm=bold ctermfg=Black ctermbg=LightGreen",
+	 "StatusLineTerm term=reverse,bold cterm=bold ctermfg=Black ctermbg=LightGreen gui=bold guifg=bg guibg=LightGreen"),
+    CENT("StatusLineTermNC term=reverse ctermfg=Black ctermbg=LightGreen",
+	 "StatusLineTermNC term=reverse ctermfg=Black ctermbg=LightGreen guifg=bg guibg=LightGreen"),
+#endif
+    NULL
+};
 
     void
 init_highlight(
@@ -7120,6 +7230,115 @@ load_colors(char_u *name)
     recursive = FALSE;
 
     return retval;
+}
+
+static char *(color_names[28]) = {
+	    "Black", "DarkBlue", "DarkGreen", "DarkCyan",
+	    "DarkRed", "DarkMagenta", "Brown", "DarkYellow",
+	    "Gray", "Grey", "LightGray", "LightGrey",
+	    "DarkGray", "DarkGrey",
+	    "Blue", "LightBlue", "Green", "LightGreen",
+	    "Cyan", "LightCyan", "Red", "LightRed", "Magenta",
+	    "LightMagenta", "Yellow", "LightYellow", "White", "NONE"};
+	    /* indices:
+	     * 0, 1, 2, 3,
+	     * 4, 5, 6, 7,
+	     * 8, 9, 10, 11,
+	     * 12, 13,
+	     * 14, 15, 16, 17,
+	     * 18, 19, 20, 21, 22,
+	     * 23, 24, 25, 26, 27 */
+static int color_numbers_16[28] = {0, 1, 2, 3,
+				 4, 5, 6, 6,
+				 7, 7, 7, 7,
+				 8, 8,
+				 9, 9, 10, 10,
+				 11, 11, 12, 12, 13,
+				 13, 14, 14, 15, -1};
+/* for xterm with 88 colors... */
+static int color_numbers_88[28] = {0, 4, 2, 6,
+				 1, 5, 32, 72,
+				 84, 84, 7, 7,
+				 82, 82,
+				 12, 43, 10, 61,
+				 14, 63, 9, 74, 13,
+				 75, 11, 78, 15, -1};
+/* for xterm with 256 colors... */
+static int color_numbers_256[28] = {0, 4, 2, 6,
+				 1, 5, 130, 130,
+				 248, 248, 7, 7,
+				 242, 242,
+				 12, 81, 10, 121,
+				 14, 159, 9, 224, 13,
+				 225, 11, 229, 15, -1};
+/* for terminals with less than 16 colors... */
+static int color_numbers_8[28] = {0, 4, 2, 6,
+				 1, 5, 3, 3,
+				 7, 7, 7, 7,
+				 0+8, 0+8,
+				 4+8, 4+8, 2+8, 2+8,
+				 6+8, 6+8, 1+8, 1+8, 5+8,
+				 5+8, 3+8, 3+8, 7+8, -1};
+
+/*
+ * Lookup the "cterm" value to be used for color with index "idx" in
+ * color_names[].
+ * "boldp" will be set to TRUE or FALSE for a foreground color when using 8
+ * colors, otherwise it will be unchanged.
+ */
+    int
+lookup_color(int idx, int foreground, int *boldp)
+{
+    int		color = color_numbers_16[idx];
+    char_u	*p;
+
+    /* Use the _16 table to check if it's a valid color name. */
+    if (color < 0)
+	return -1;
+
+    if (t_colors == 8)
+    {
+	/* t_Co is 8: use the 8 colors table */
+#if defined(__QNXNTO__)
+	color = color_numbers_8_qansi[idx];
+#else
+	color = color_numbers_8[idx];
+#endif
+	if (foreground)
+	{
+	    /* set/reset bold attribute to get light foreground
+	     * colors (on some terminals, e.g. "linux") */
+	    if (color & 8)
+		*boldp = TRUE;
+	    else
+		*boldp = FALSE;
+	}
+	color &= 7;	/* truncate to 8 colors */
+    }
+    else if (t_colors == 16 || t_colors == 88
+					   || t_colors >= 256)
+    {
+	/*
+	 * Guess: if the termcap entry ends in 'm', it is
+	 * probably an xterm-like terminal.  Use the changed
+	 * order for colors.
+	 */
+	if (*T_CAF != NUL)
+	    p = T_CAF;
+	else
+	    p = T_CSF;
+	if (*p != NUL && (t_colors > 256
+			      || *(p + STRLEN(p) - 1) == 'm'))
+	{
+	    if (t_colors == 88)
+		color = color_numbers_88[idx];
+	    else if (t_colors >= 256)
+		color = color_numbers_256[idx];
+	    else
+		color = color_numbers_8[idx];
+	}
+    }
+    return color;
 }
 
 /*
@@ -7265,6 +7484,7 @@ do_highlight(
 #ifdef FEAT_EVAL
 		HL_TABLE()[from_id - 1].sg_scriptID = current_SID;
 #endif
+		HL_TABLE()[from_id - 1].sg_cleared = FALSE;
 		redraw_all_later(SOME_VALID);
 	    }
 	}
@@ -7396,7 +7616,7 @@ do_highlight(
 	 * Isolate the key ("term", "ctermfg", "ctermbg", "font", "guifg" or
 	 * "guibg").
 	 */
-	while (*linep && !vim_iswhite(*linep) && *linep != '=')
+	while (*linep && !VIM_ISWHITE(*linep) && *linep != '=')
 	    ++linep;
 	vim_free(key);
 	key = vim_strnsave_up(key_start, (int)(linep - key_start));
@@ -7623,45 +7843,8 @@ do_highlight(
 	    }
 	    else
 	    {
-		static char *(color_names[28]) = {
-			    "Black", "DarkBlue", "DarkGreen", "DarkCyan",
-			    "DarkRed", "DarkMagenta", "Brown", "DarkYellow",
-			    "Gray", "Grey",
-			    "LightGray", "LightGrey", "DarkGray", "DarkGrey",
-			    "Blue", "LightBlue", "Green", "LightGreen",
-			    "Cyan", "LightCyan", "Red", "LightRed", "Magenta",
-			    "LightMagenta", "Yellow", "LightYellow", "White", "NONE"};
-		static int color_numbers_16[28] = {0, 1, 2, 3,
-						 4, 5, 6, 6,
-						 7, 7,
-						 7, 7, 8, 8,
-						 9, 9, 10, 10,
-						 11, 11, 12, 12, 13,
-						 13, 14, 14, 15, -1};
-		/* for xterm with 88 colors... */
-		static int color_numbers_88[28] = {0, 4, 2, 6,
-						 1, 5, 32, 72,
-						 84, 84,
-						 7, 7, 82, 82,
-						 12, 43, 10, 61,
-						 14, 63, 9, 74, 13,
-						 75, 11, 78, 15, -1};
-		/* for xterm with 256 colors... */
-		static int color_numbers_256[28] = {0, 4, 2, 6,
-						 1, 5, 130, 130,
-						 248, 248,
-						 7, 7, 242, 242,
-						 12, 81, 10, 121,
-						 14, 159, 9, 224, 13,
-						 225, 11, 229, 15, -1};
-		/* for terminals with less than 16 colors... */
-		static int color_numbers_8[28] = {0, 4, 2, 6,
-						 1, 5, 3, 3,
-						 7, 7,
-						 7, 7, 0+8, 0+8,
-						 4+8, 4+8, 2+8, 2+8,
-						 6+8, 6+8, 1+8, 1+8, 5+8,
-						 5+8, 3+8, 3+8, 7+8, -1};
+		int bold = MAYBE;
+
 #if defined(__QNXNTO__)
 		static int *color_numbers_8_qansi = color_numbers_8;
 		/* On qnx, the 8 & 16 color arrays are the same */
@@ -7682,57 +7865,19 @@ do_highlight(
 		    break;
 		}
 
-		/* Use the _16 table to check if its a valid color name. */
-		color = color_numbers_16[i];
-		if (color >= 0)
+		color = lookup_color(i, key[5] == 'F', &bold);
+
+		/* set/reset bold attribute to get light foreground
+		 * colors (on some terminals, e.g. "linux") */
+		if (bold == TRUE)
 		{
-		    if (t_colors == 8)
-		    {
-			/* t_Co is 8: use the 8 colors table */
-#if defined(__QNXNTO__)
-			color = color_numbers_8_qansi[i];
-#else
-			color = color_numbers_8[i];
-#endif
-			if (key[5] == 'F')
-			{
-			    /* set/reset bold attribute to get light foreground
-			     * colors (on some terminals, e.g. "linux") */
-			    if (color & 8)
-			    {
-				HL_TABLE()[idx].sg_cterm |= HL_BOLD;
-				HL_TABLE()[idx].sg_cterm_bold = TRUE;
-			    }
-			    else
-				HL_TABLE()[idx].sg_cterm &= ~HL_BOLD;
-			}
-			color &= 7;	/* truncate to 8 colors */
-		    }
-		    else if (t_colors == 16 || t_colors == 88
-							   || t_colors >= 256)
-		    {
-			/*
-			 * Guess: if the termcap entry ends in 'm', it is
-			 * probably an xterm-like terminal.  Use the changed
-			 * order for colors.
-			 */
-			if (*T_CAF != NUL)
-			    p = T_CAF;
-			else
-			    p = T_CSF;
-			if (*p != NUL && (t_colors > 256
-					      || *(p + STRLEN(p) - 1) == 'm'))
-			{
-			    if (t_colors == 88)
-				color = color_numbers_88[i];
-			    else if (t_colors >= 256)
-				color = color_numbers_256[i];
-			    else
-				color = color_numbers_8[i];
-			}
-		    }
+		    HL_TABLE()[idx].sg_cterm |= HL_BOLD;
+		    HL_TABLE()[idx].sg_cterm_bold = TRUE;
 		}
+		else if (bold == FALSE)
+		    HL_TABLE()[idx].sg_cterm &= ~HL_BOLD;
 	    }
+
 	    /* Add one to the argument, to avoid zero.  Zero is used for
 	     * "NONE", then "color" is -1. */
 	    if (key[5] == 'F')
@@ -7767,18 +7912,25 @@ do_highlight(
 			must_redraw = CLEAR;
 			if (color >= 0)
 			{
+			    int dark = -1;
+
 			    if (termcap_active)
 				term_bg_color(color);
 			    if (t_colors < 16)
-				i = (color == 0 || color == 4);
-			    else
-				i = (color < 7 || color == 8);
+				dark = (color == 0 || color == 4);
+			    /* Limit the heuristic to the standard 16 colors */
+			    else if (color < 16)
+				dark = (color < 7 || color == 8);
 			    /* Set the 'background' option if the value is
 			     * wrong. */
-			    if (i != (*p_bg == 'd'))
+			    if (dark != -1
+				    && dark != (*p_bg == 'd')
+				    && !option_was_set((char_u *)"bg"))
+			    {
 				set_option_value((char_u *)"bg", 0L,
-					i ?  (char_u *)"dark"
-					  : (char_u *)"light", 0);
+				       (char_u *)(dark ? "dark" : "light"), 0);
+				reset_option_was_set((char_u *)"bg");
+			    }
 			}
 		    }
 		}
@@ -7801,7 +7953,7 @@ do_highlight(
 		    HL_TABLE()[idx].sg_gui_fg = i;
 # endif
 		    vim_free(HL_TABLE()[idx].sg_gui_fg_name);
-		    if (STRCMP(arg, "NONE"))
+		    if (STRCMP(arg, "NONE") != 0)
 			HL_TABLE()[idx].sg_gui_fg_name = vim_strsave(arg);
 		    else
 			HL_TABLE()[idx].sg_gui_fg_name = NULL;
@@ -7972,6 +8124,7 @@ do_highlight(
 	    error = TRUE;
 	    break;
 	}
+	HL_TABLE()[idx].sg_cleared = FALSE;
 
 	/*
 	 * When highlighting has been given for a group, don't link it.
@@ -8098,7 +8251,7 @@ hl_has_settings(int idx, int check_link)
 	    || HL_TABLE()[idx].sg_gui_fg_name != NULL
 	    || HL_TABLE()[idx].sg_gui_bg_name != NULL
 	    || HL_TABLE()[idx].sg_gui_sp_name != NULL
-	    || HL_TABLE()[idx].sg_font_name != NUL
+	    || HL_TABLE()[idx].sg_font_name != NULL
 #endif
 	    || (check_link && (HL_TABLE()[idx].sg_set & SG_LINK)));
 }
@@ -8109,6 +8262,8 @@ hl_has_settings(int idx, int check_link)
     static void
 highlight_clear(int idx)
 {
+    HL_TABLE()[idx].sg_cleared = TRUE;
+
     HL_TABLE()[idx].sg_term = 0;
     vim_free(HL_TABLE()[idx].sg_start);
     HL_TABLE()[idx].sg_start = NULL;
@@ -8473,7 +8628,7 @@ hl_do_font(
  * Return the handle for a color name.
  * Returns INVALCOLOR when failed.
  */
-    static guicolor_T
+    guicolor_T
 color_name2handle(char_u *name)
 {
     if (STRCMP(name, "NONE") == 0)
@@ -8671,6 +8826,58 @@ get_attr_entry(garray_T *table, attrentry_T *aep)
 }
 
 /*
+ * Get an attribute index for a cterm entry.
+ * Uses an existing entry when possible or adds one when needed.
+ */
+    int
+get_cterm_attr_idx(int attr, int fg, int bg)
+{
+    attrentry_T		at_en;
+
+    vim_memset(&at_en, 0, sizeof(attrentry_T));
+    at_en.ae_attr = attr;
+    at_en.ae_u.cterm.fg_color = fg;
+    at_en.ae_u.cterm.bg_color = bg;
+    return get_attr_entry(&cterm_attr_table, &at_en);
+}
+
+#if defined(FEAT_TERMGUICOLORS) || defined(PROTO)
+/*
+ * Get an attribute index for a 'termguicolors' entry.
+ * Uses an existing entry when possible or adds one when needed.
+ */
+    int
+get_tgc_attr_idx(int attr, guicolor_T fg, guicolor_T bg)
+{
+    attrentry_T		at_en;
+
+    vim_memset(&at_en, 0, sizeof(attrentry_T));
+    at_en.ae_attr = attr;
+    at_en.ae_u.cterm.fg_rgb = fg;
+    at_en.ae_u.cterm.bg_rgb = bg;
+    return get_attr_entry(&cterm_attr_table, &at_en);
+}
+#endif
+
+#if defined(FEAT_GUI) || defined(PROTO)
+/*
+ * Get an attribute index for a cterm entry.
+ * Uses an existing entry when possible or adds one when needed.
+ */
+    int
+get_gui_attr_idx(int attr, guicolor_T fg, guicolor_T bg)
+{
+    attrentry_T		at_en;
+
+    vim_memset(&at_en, 0, sizeof(attrentry_T));
+    at_en.ae_attr = attr;
+    at_en.ae_u.gui.fg_color = fg;
+    at_en.ae_u.gui.bg_color = bg;
+    return get_attr_entry(&gui_attr_table, &at_en);
+}
+#endif
+
+/*
  * Clear all highlight tables.
  */
     void
@@ -8712,7 +8919,7 @@ hl_combine_attr(int char_attr, int prim_attr)
     if (char_attr == 0)
 	return prim_attr;
     if (char_attr <= HL_ALL && prim_attr <= HL_ALL)
-	return char_attr | prim_attr;
+	return ATTR_COMBINE(char_attr, prim_attr);
 #ifdef FEAT_GUI
     if (gui.in_use)
     {
@@ -8731,13 +8938,14 @@ hl_combine_attr(int char_attr, int prim_attr)
 	}
 
 	if (prim_attr <= HL_ALL)
-	    new_en.ae_attr |= prim_attr;
+	    new_en.ae_attr = ATTR_COMBINE(new_en.ae_attr, prim_attr);
 	else
 	{
 	    spell_aep = syn_gui_attr2entry(prim_attr);
 	    if (spell_aep != NULL)
 	    {
-		new_en.ae_attr |= spell_aep->ae_attr;
+		new_en.ae_attr = ATTR_COMBINE(new_en.ae_attr,
+							   spell_aep->ae_attr);
 		if (spell_aep->ae_u.gui.fg_color != INVALCOLOR)
 		    new_en.ae_u.gui.fg_color = spell_aep->ae_u.gui.fg_color;
 		if (spell_aep->ae_u.gui.bg_color != INVALCOLOR)
@@ -8765,18 +8973,23 @@ hl_combine_attr(int char_attr, int prim_attr)
 	else
 	{
 	    vim_memset(&new_en, 0, sizeof(new_en));
+#ifdef FEAT_TERMGUICOLORS
+	    new_en.ae_u.cterm.bg_rgb = INVALCOLOR;
+	    new_en.ae_u.cterm.fg_rgb = INVALCOLOR;
+#endif
 	    if (char_attr <= HL_ALL)
 		new_en.ae_attr = char_attr;
 	}
 
 	if (prim_attr <= HL_ALL)
-	    new_en.ae_attr |= prim_attr;
+		new_en.ae_attr = ATTR_COMBINE(new_en.ae_attr, prim_attr);
 	else
 	{
 	    spell_aep = syn_cterm_attr2entry(prim_attr);
 	    if (spell_aep != NULL)
 	    {
-		new_en.ae_attr |= spell_aep->ae_attr;
+		new_en.ae_attr = ATTR_COMBINE(new_en.ae_attr,
+							   spell_aep->ae_attr);
 		if (spell_aep->ae_u.cterm.fg_color > 0)
 		    new_en.ae_u.cterm.fg_color = spell_aep->ae_u.cterm.fg_color;
 		if (spell_aep->ae_u.cterm.bg_color > 0)
@@ -8804,13 +9017,13 @@ hl_combine_attr(int char_attr, int prim_attr)
     }
 
     if (prim_attr <= HL_ALL)
-	new_en.ae_attr |= prim_attr;
+	new_en.ae_attr = ATTR_COMBINE(new_en.ae_attr, prim_attr);
     else
     {
 	spell_aep = syn_term_attr2entry(prim_attr);
 	if (spell_aep != NULL)
 	{
-	    new_en.ae_attr |= spell_aep->ae_attr;
+	    new_en.ae_attr = ATTR_COMBINE(new_en.ae_attr, spell_aep->ae_attr);
 	    if (spell_aep->ae_u.term.start != NULL)
 	    {
 		new_en.ae_u.term.start = spell_aep->ae_u.term.start;
@@ -8922,7 +9135,7 @@ highlight_list_one(int id)
     {
 	(void)syn_list_header(didh, 9999, id);
 	didh = TRUE;
-	msg_puts_attr((char_u *)"links to", hl_attr(HLF_D));
+	msg_puts_attr((char_u *)"links to", HL_ATTR(HLF_D));
 	msg_putchar(' ');
 	msg_outtrans(HL_TABLE()[HL_TABLE()[id - 1].sg_link - 1].sg_name);
     }
@@ -8979,8 +9192,8 @@ highlight_list_arg(
 	{
 	    if (*name != NUL)
 	    {
-		MSG_PUTS_ATTR(name, hl_attr(HLF_D));
-		MSG_PUTS_ATTR("=", hl_attr(HLF_D));
+		MSG_PUTS_ATTR(name, HL_ATTR(HLF_D));
+		MSG_PUTS_ATTR("=", HL_ATTR(HLF_D));
 	    }
 	    msg_outtrans(ts);
 	}
@@ -9269,7 +9482,7 @@ set_hl_attr(
 }
 
 /*
- * Lookup a highlight group name and return it's ID.
+ * Lookup a highlight group name and return its ID.
  * If it is not found, 0 is returned.
  */
     int
@@ -9334,7 +9547,7 @@ syn_namen2id(char_u *linep, int len)
 }
 
 /*
- * Find highlight group name in the table and return it's ID.
+ * Find highlight group name in the table and return its ID.
  * The argument is a pointer to the name and the length of the name.
  * If it doesn't exist yet, a new entry is created.
  * Return 0 for failure.
@@ -9358,7 +9571,7 @@ syn_check_group(char_u *pp, int len)
 }
 
 /*
- * Add new highlight group and return it's ID.
+ * Add new highlight group and return its ID.
  * "name" must be an allocated string, it will be consumed.
  * Return 0 for failure.
  */
@@ -9380,7 +9593,7 @@ syn_add_group(char_u *name)
 	{
 	    /* This is an error, but since there previously was no check only
 	     * give a warning. */
-	    msg_source(hl_attr(HLF_W));
+	    msg_source(HL_ATTR(HLF_W));
 	    MSG(_("W18: Invalid character in group name"));
 	    break;
 	}
@@ -9580,6 +9793,73 @@ gui_do_one_color(
 }
 #endif
 
+#if defined(USER_HIGHLIGHT) && defined(FEAT_STL_OPT)
+/*
+ * Apply difference between User[1-9] and HLF_S to HLF_SNC, HLF_ST or HLF_STNC.
+ */
+    static void
+combine_stl_hlt(
+	int id,
+	int id_S,
+	int id_alt,
+	int hlcnt,
+	int i,
+	int hlf,
+	int *table)
+{
+    struct hl_group *hlt = HL_TABLE();
+
+    if (id_alt == 0)
+    {
+	vim_memset(&hlt[hlcnt + i], 0, sizeof(struct hl_group));
+	hlt[hlcnt + i].sg_term = highlight_attr[hlf];
+	hlt[hlcnt + i].sg_cterm = highlight_attr[hlf];
+#  if defined(FEAT_GUI) || defined(FEAT_EVAL)
+	hlt[hlcnt + i].sg_gui = highlight_attr[hlf];
+#  endif
+    }
+    else
+	mch_memmove(&hlt[hlcnt + i],
+		    &hlt[id_alt - 1],
+		    sizeof(struct hl_group));
+    hlt[hlcnt + i].sg_link = 0;
+
+    hlt[hlcnt + i].sg_term ^=
+	hlt[id - 1].sg_term ^ hlt[id_S - 1].sg_term;
+    if (hlt[id - 1].sg_start != hlt[id_S - 1].sg_start)
+	hlt[hlcnt + i].sg_start = hlt[id - 1].sg_start;
+    if (hlt[id - 1].sg_stop != hlt[id_S - 1].sg_stop)
+	hlt[hlcnt + i].sg_stop = hlt[id - 1].sg_stop;
+    hlt[hlcnt + i].sg_cterm ^=
+	hlt[id - 1].sg_cterm ^ hlt[id_S - 1].sg_cterm;
+    if (hlt[id - 1].sg_cterm_fg != hlt[id_S - 1].sg_cterm_fg)
+	hlt[hlcnt + i].sg_cterm_fg = hlt[id - 1].sg_cterm_fg;
+    if (hlt[id - 1].sg_cterm_bg != hlt[id_S - 1].sg_cterm_bg)
+	hlt[hlcnt + i].sg_cterm_bg = hlt[id - 1].sg_cterm_bg;
+#  if defined(FEAT_GUI) || defined(FEAT_EVAL)
+    hlt[hlcnt + i].sg_gui ^=
+	hlt[id - 1].sg_gui ^ hlt[id_S - 1].sg_gui;
+#  endif
+#  ifdef FEAT_GUI
+    if (hlt[id - 1].sg_gui_fg != hlt[id_S - 1].sg_gui_fg)
+	hlt[hlcnt + i].sg_gui_fg = hlt[id - 1].sg_gui_fg;
+    if (hlt[id - 1].sg_gui_bg != hlt[id_S - 1].sg_gui_bg)
+	hlt[hlcnt + i].sg_gui_bg = hlt[id - 1].sg_gui_bg;
+    if (hlt[id - 1].sg_gui_sp != hlt[id_S - 1].sg_gui_sp)
+	hlt[hlcnt + i].sg_gui_sp = hlt[id - 1].sg_gui_sp;
+    if (hlt[id - 1].sg_font != hlt[id_S - 1].sg_font)
+	hlt[hlcnt + i].sg_font = hlt[id - 1].sg_font;
+#   ifdef FEAT_XFONTSET
+    if (hlt[id - 1].sg_fontset != hlt[id_S - 1].sg_fontset)
+	hlt[hlcnt + i].sg_fontset = hlt[id - 1].sg_fontset;
+#   endif
+#  endif
+    highlight_ga.ga_len = hlcnt + i + 1;
+    set_hl_attr(hlcnt + i);	/* At long last we can apply */
+    table[i] = syn_id2attr(hlcnt + i + 1);
+}
+#endif
+
 /*
  * Translate the 'highlight' option into attributes in highlight_attr[] and
  * set up the user highlights User1..9.  If FEAT_STL_OPT is in use, a set of
@@ -9602,6 +9882,10 @@ highlight_changed(void)
 # ifdef FEAT_STL_OPT
     int		id_SNC = -1;
     int		id_S = -1;
+#  ifdef FEAT_TERMINAL
+    int		id_ST = -1;
+    int		id_STNC = -1;
+#  endif
     int		hlcnt;
 # endif
 #endif
@@ -9644,7 +9928,7 @@ highlight_changed(void)
 	    attr = 0;
 	    for ( ; *p && *p != ','; ++p)	    /* parse upto comma */
 	    {
-		if (vim_iswhite(*p))		    /* ignore white space */
+		if (VIM_ISWHITE(*p))		    /* ignore white space */
 		    continue;
 
 		if (attr > HL_ALL)  /* Combination with ':' is not allowed. */
@@ -9681,6 +9965,12 @@ highlight_changed(void)
 #if defined(FEAT_STL_OPT) && defined(USER_HIGHLIGHT)
 				if (hlf == (int)HLF_SNC)
 				    id_SNC = syn_get_final_id(id);
+# ifdef FEAT_TERMINAL
+				else if (hlf == (int)HLF_ST)
+				    id_ST = syn_get_final_id(id);
+				else if (hlf == (int)HLF_STNC)
+				    id_STNC = syn_get_final_id(id);
+# endif
 				else if (hlf == (int)HLF_S)
 				    id_S = syn_get_final_id(id);
 #endif
@@ -9697,18 +9987,25 @@ highlight_changed(void)
 #ifdef USER_HIGHLIGHT
     /* Setup the user highlights
      *
-     * Temporarily  utilize 10 more hl entries.  Have to be in there
-     * simultaneously in case of table overflows in get_attr_entry()
+     * Temporarily utilize 28 more hl entries:
+     * 9 for User1-User9 combined with StatusLineNC
+     * 9 for User1-User9 combined with StatusLineTerm
+     * 9 for User1-User9 combined with StatusLineTermNC
+     * 1 for StatusLine default
+     * Have to be in there simultaneously in case of table overflows in
+     * get_attr_entry()
      */
 # ifdef FEAT_STL_OPT
-    if (ga_grow(&highlight_ga, 10) == FAIL)
+    if (ga_grow(&highlight_ga, 28) == FAIL)
 	return FAIL;
     hlcnt = highlight_ga.ga_len;
-    if (id_S == 0)
-    {		    /* Make sure id_S is always valid to simplify code below */
-	vim_memset(&HL_TABLE()[hlcnt + 9], 0, sizeof(struct hl_group));
-	HL_TABLE()[hlcnt + 9].sg_term = highlight_attr[HLF_S];
-	id_S = hlcnt + 10;
+    if (id_S == -1)
+    {
+	/* Make sure id_S is always valid to simplify code below. Use the last
+	 * entry. */
+	vim_memset(&HL_TABLE()[hlcnt + 27], 0, sizeof(struct hl_group));
+	HL_TABLE()[hlcnt + 18].sg_term = highlight_attr[HLF_S];
+	id_S = hlcnt + 19;
     }
 # endif
     for (i = 0; i < 9; i++)
@@ -9720,65 +10017,24 @@ highlight_changed(void)
 	    highlight_user[i] = 0;
 # ifdef FEAT_STL_OPT
 	    highlight_stlnc[i] = 0;
+#  ifdef FEAT_TERMINAL
+	    highlight_stlterm[i] = 0;
+	    highlight_stltermnc[i] = 0;
+#  endif
 # endif
 	}
 	else
 	{
-# ifdef FEAT_STL_OPT
-	    struct hl_group *hlt = HL_TABLE();
-# endif
-
 	    highlight_user[i] = syn_id2attr(id);
 # ifdef FEAT_STL_OPT
-	    if (id_SNC == 0)
-	    {
-		vim_memset(&hlt[hlcnt + i], 0, sizeof(struct hl_group));
-		hlt[hlcnt + i].sg_term = highlight_attr[HLF_SNC];
-		hlt[hlcnt + i].sg_cterm = highlight_attr[HLF_SNC];
-#  if defined(FEAT_GUI) || defined(FEAT_EVAL)
-		hlt[hlcnt + i].sg_gui = highlight_attr[HLF_SNC];
+	    combine_stl_hlt(id, id_S, id_SNC, hlcnt, i,
+						     HLF_SNC, highlight_stlnc);
+#  ifdef FEAT_TERMINAL
+	    combine_stl_hlt(id, id_S, id_ST, hlcnt + 9, i,
+						    HLF_ST, highlight_stlterm);
+	    combine_stl_hlt(id, id_S, id_STNC, hlcnt + 18, i,
+						HLF_STNC, highlight_stltermnc);
 #  endif
-	    }
-	    else
-		mch_memmove(&hlt[hlcnt + i],
-			    &hlt[id_SNC - 1],
-			    sizeof(struct hl_group));
-	    hlt[hlcnt + i].sg_link = 0;
-
-	    /* Apply difference between UserX and HLF_S to HLF_SNC */
-	    hlt[hlcnt + i].sg_term ^=
-		hlt[id - 1].sg_term ^ hlt[id_S - 1].sg_term;
-	    if (hlt[id - 1].sg_start != hlt[id_S - 1].sg_start)
-		hlt[hlcnt + i].sg_start = hlt[id - 1].sg_start;
-	    if (hlt[id - 1].sg_stop != hlt[id_S - 1].sg_stop)
-		hlt[hlcnt + i].sg_stop = hlt[id - 1].sg_stop;
-	    hlt[hlcnt + i].sg_cterm ^=
-		hlt[id - 1].sg_cterm ^ hlt[id_S - 1].sg_cterm;
-	    if (hlt[id - 1].sg_cterm_fg != hlt[id_S - 1].sg_cterm_fg)
-		hlt[hlcnt + i].sg_cterm_fg = hlt[id - 1].sg_cterm_fg;
-	    if (hlt[id - 1].sg_cterm_bg != hlt[id_S - 1].sg_cterm_bg)
-		hlt[hlcnt + i].sg_cterm_bg = hlt[id - 1].sg_cterm_bg;
-#  if defined(FEAT_GUI) || defined(FEAT_EVAL)
-	    hlt[hlcnt + i].sg_gui ^=
-		hlt[id - 1].sg_gui ^ hlt[id_S - 1].sg_gui;
-#  endif
-#  ifdef FEAT_GUI
-	    if (hlt[id - 1].sg_gui_fg != hlt[id_S - 1].sg_gui_fg)
-		hlt[hlcnt + i].sg_gui_fg = hlt[id - 1].sg_gui_fg;
-	    if (hlt[id - 1].sg_gui_bg != hlt[id_S - 1].sg_gui_bg)
-		hlt[hlcnt + i].sg_gui_bg = hlt[id - 1].sg_gui_bg;
-	    if (hlt[id - 1].sg_gui_sp != hlt[id_S - 1].sg_gui_sp)
-		hlt[hlcnt + i].sg_gui_sp = hlt[id - 1].sg_gui_sp;
-	    if (hlt[id - 1].sg_font != hlt[id_S - 1].sg_font)
-		hlt[hlcnt + i].sg_font = hlt[id - 1].sg_font;
-#   ifdef FEAT_XFONTSET
-	    if (hlt[id - 1].sg_fontset != hlt[id_S - 1].sg_fontset)
-		hlt[hlcnt + i].sg_fontset = hlt[id - 1].sg_fontset;
-#   endif
-#  endif
-	    highlight_ga.ga_len = hlcnt + i + 1;
-	    set_hl_attr(hlcnt + i);	/* At long last we can apply */
-	    highlight_stlnc[i] = syn_id2attr(hlcnt + i + 1);
 # endif
 	}
     }
@@ -9855,7 +10111,7 @@ highlight_list(void)
     int		i;
 
     for (i = 10; --i >= 0; )
-	highlight_list_two(i, hl_attr(HLF_D));
+	highlight_list_two(i, HL_ATTR(HLF_D));
     for (i = 40; --i >= 0; )
 	highlight_list_two(99, 0);
 }
@@ -9875,11 +10131,28 @@ highlight_list_two(int cnt, int attr)
     || defined(FEAT_SIGNS) || defined(PROTO)
 /*
  * Function given to ExpandGeneric() to obtain the list of group names.
- * Also used for synIDattr() function.
  */
     char_u *
 get_highlight_name(expand_T *xp UNUSED, int idx)
 {
+    return get_highlight_name_ext(xp, idx, TRUE);
+}
+
+/*
+ * Obtain a highlight group name.
+ * When "skip_cleared" is TRUE don't return a cleared entry.
+ */
+    char_u *
+get_highlight_name_ext(expand_T *xp UNUSED, int idx, int skip_cleared)
+{
+    if (idx < 0)
+	return NULL;
+
+    /* Items are never removed from the table, skip the ones that were
+     * cleared. */
+    if (skip_cleared && idx < highlight_ga.ga_len && HL_TABLE()[idx].sg_cleared)
+	return (char_u *)"";
+
 #ifdef FEAT_CMDL_COMPL
     if (idx == highlight_ga.ga_len && include_none != 0)
 	return (char_u *)"none";
@@ -9892,7 +10165,7 @@ get_highlight_name(expand_T *xp UNUSED, int idx)
 							 && include_link != 0)
 	return (char_u *)"clear";
 #endif
-    if (idx < 0 || idx >= highlight_ga.ga_len)
+    if (idx >= highlight_ga.ga_len)
 	return NULL;
     return HL_TABLE()[idx].sg_name;
 }

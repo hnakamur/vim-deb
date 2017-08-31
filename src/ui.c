@@ -363,12 +363,19 @@ ui_breakcheck(void)
     void
 ui_breakcheck_force(int force)
 {
+    int save_us = updating_screen;
+
+    /* We do not want gui_resize_shell() to redraw the screen here. */
+    ++updating_screen;
+
 #ifdef FEAT_GUI
     if (gui.in_use)
 	gui_mch_update();
     else
 #endif
 	mch_breakcheck(force);
+
+    updating_screen = save_us;
 }
 
 /*****************************************************************************
@@ -384,8 +391,6 @@ ui_breakcheck_force(int force)
  */
 
 #if defined(FEAT_CLIPBOARD) || defined(PROTO)
-
-static void clip_copy_selection(VimClipboard *clip);
 
 /*
  * Selection stuff using Visual mode, for cutting and pasting text to other
@@ -435,7 +440,7 @@ clip_update_selection(VimClipboard *clip)
     /* If visual mode is only due to a redo command ("."), then ignore it */
     if (!redo_VIsual_busy && VIsual_active && (State & NORMAL))
     {
-	if (lt(VIsual, curwin->w_cursor))
+	if (LT_POS(VIsual, curwin->w_cursor))
 	{
 	    start = VIsual;
 	    end = curwin->w_cursor;
@@ -449,8 +454,8 @@ clip_update_selection(VimClipboard *clip)
 	    start = curwin->w_cursor;
 	    end = VIsual;
 	}
-	if (!equalpos(clip->start, start)
-		|| !equalpos(clip->end, end)
+	if (!EQUAL_POS(clip->start, start)
+		|| !EQUAL_POS(clip->end, end)
 		|| clip->vmode != VIsual_mode)
 	{
 	    clip_clear_selection(clip);
@@ -489,7 +494,7 @@ clip_own_selection(VimClipboard *cbd)
 					    || get_real_state() == SELECTMODE)
 		    && (cbd == &clip_star ? clip_isautosel_star()
 						      : clip_isautosel_plus())
-		    && hl_attr(HLF_V) != hl_attr(HLF_VNC))
+		    && HL_ATTR(HLF_V) != HL_ATTR(HLF_VNC))
 		redraw_curbuf_later(INVERTED_ALL);
 	}
     }
@@ -527,7 +532,7 @@ clip_lose_selection(VimClipboard *cbd)
 					    || get_real_state() == SELECTMODE)
 		&& (cbd == &clip_star ?
 				clip_isautosel_star() : clip_isautosel_plus())
-		&& hl_attr(HLF_V) != hl_attr(HLF_VNC))
+		&& HL_ATTR(HLF_V) != HL_ATTR(HLF_VNC))
 	{
 	    update_curbuf(INVERTED_ALL);
 	    setcursor();
@@ -562,7 +567,8 @@ clip_copy_selection(VimClipboard *clip)
  * considerably.
  */
 static int global_change_count = 0; /* if set, inside a start_global_changes */
-static int clipboard_needs_update; /* clipboard needs to be updated */
+static int clipboard_needs_update = FALSE; /* clipboard needs to be updated */
+static int clip_did_set_selection = TRUE;
 
 /*
  * Save clip_unnamed and reset it.
@@ -580,6 +586,16 @@ start_global_changes(void)
 	clip_unnamed = FALSE;
 	clip_did_set_selection = FALSE;
     }
+}
+
+/*
+ * Return TRUE if setting the clipboard was postponed, it already contains the
+ * right text.
+ */
+    int
+is_clipboard_needs_update()
+{
+    return clipboard_needs_update;
 }
 
 /*
@@ -612,6 +628,7 @@ end_global_changes(void)
 	    }
 	}
     }
+    clipboard_needs_update = FALSE;
 }
 
 /*
@@ -1925,14 +1942,14 @@ read_error_exit(void)
  * May update the shape of the cursor.
  */
     void
-ui_cursor_shape(void)
+ui_cursor_shape_forced(int forced)
 {
 # ifdef FEAT_GUI
     if (gui.in_use)
 	gui_update_cursor_later();
     else
 # endif
-	term_cursor_shape();
+	term_cursor_mode(forced);
 
 # ifdef MCH_CURSOR_SHAPE
     mch_update_cursor();
@@ -1941,6 +1958,12 @@ ui_cursor_shape(void)
 # ifdef FEAT_CONCEAL
     conceal_check_cursur_line();
 # endif
+}
+
+    void
+ui_cursor_shape(void)
+{
+    ui_cursor_shape_forced(FALSE);
 }
 #endif
 
@@ -2025,10 +2048,11 @@ x11_setup_atoms(Display *dpy)
  * X Selection stuff, for cutting and pasting text to other windows.
  */
 
-static Boolean	clip_x11_convert_selection_cb(Widget, Atom *, Atom *, Atom *, XtPointer *, long_u *, int *);
-static void  clip_x11_lose_ownership_cb(Widget, Atom *);
+static Boolean	clip_x11_convert_selection_cb(Widget w, Atom *sel_atom, Atom *target, Atom *type, XtPointer *value, long_u *length, int *format);
+static void clip_x11_lose_ownership_cb(Widget w, Atom *sel_atom);
+static void clip_x11_notify_cb(Widget w, Atom *sel_atom, Atom *target);
 static void clip_x11_timestamp_cb(Widget w, XtPointer n, XEvent *event, Boolean *cont);
-static void  clip_x11_request_selection_cb(Widget, XtPointer, Atom *, Atom *, XtPointer, long_u *, int *);
+static void clip_x11_request_selection_cb(Widget w, XtPointer success, Atom *sel_atom, Atom *type, XtPointer value, long_u *length, int *format);
 
 /*
  * Property callback to get a timestamp for XtOwnSelection.
@@ -2068,7 +2092,7 @@ clip_x11_timestamp_cb(
     /* Get the selection, using the event timestamp. */
     if (XtOwnSelection(w, xproperty->atom, xproperty->time,
 	    clip_x11_convert_selection_cb, clip_x11_lose_ownership_cb,
-	    NULL) == OK)
+	    clip_x11_notify_cb) == OK)
     {
 	/* Set the "owned" flag now, there may have been a call to
 	 * lose_ownership_cb in between. */
@@ -2259,9 +2283,9 @@ clip_x11_request_selection(
 	start_time = time(NULL);
 	while (success == MAYBE)
 	{
-	    if (XCheckTypedEvent(dpy, SelectionNotify, &event)
-		    || XCheckTypedEvent(dpy, SelectionRequest, &event)
-		    || XCheckTypedEvent(dpy, PropertyNotify, &event))
+	    if (XCheckTypedEvent(dpy, PropertyNotify, &event)
+		    || XCheckTypedEvent(dpy, SelectionNotify, &event)
+		    || XCheckTypedEvent(dpy, SelectionRequest, &event))
 	    {
 		/* This is where clip_x11_request_selection_cb() should be
 		 * called.  It may actually happen a bit later, so we loop
@@ -2314,11 +2338,12 @@ clip_x11_convert_selection_cb(
     long_u	*length,
     int		*format)
 {
-    char_u	*string;
-    char_u	*result;
-    int		motion_type;
-    VimClipboard	*cbd;
-    int		i;
+    static char_u   *save_result = NULL;
+    static long_u   save_length = 0;
+    char_u	    *string;
+    int		    motion_type;
+    VimClipboard    *cbd;
+    int		    i;
 
     if (*sel_atom == clip_plus.sel_atom)
 	cbd = &clip_plus;
@@ -2331,10 +2356,8 @@ clip_x11_convert_selection_cb(
     /* requestor wants to know what target types we support */
     if (*target == targets_atom)
     {
-	Atom *array;
+	static Atom array[7];
 
-	if ((array = (Atom *)XtMalloc((unsigned)(sizeof(Atom) * 7))) == NULL)
-	    return False;
 	*value = (XtPointer)array;
 	i = 0;
 	array[i++] = targets_atom;
@@ -2383,13 +2406,17 @@ clip_x11_convert_selection_cb(
 	*length += STRLEN(p_enc) + 2;
 #endif
 
-    *value = XtMalloc((Cardinal)*length);
-    result = (char_u *)*value;
-    if (result == NULL)
+    if (save_length < *length || save_length / 2 >= *length)
+	*value = XtRealloc((char *)save_result, (Cardinal)*length + 1);
+    else
+	*value = save_result;
+    if (*value == NULL)
     {
 	vim_free(string);
 	return False;
     }
+    save_result = (char_u *)*value;
+    save_length = *length;
 
     if (*target == XA_STRING
 #ifdef FEAT_MBYTE
@@ -2397,13 +2424,13 @@ clip_x11_convert_selection_cb(
 #endif
 	    )
     {
-	mch_memmove(result, string, (size_t)(*length));
+	mch_memmove(save_result, string, (size_t)(*length));
 	*type = *target;
     }
     else if (*target == compound_text_atom || *target == text_atom)
     {
 	XTextProperty	text_prop;
-	char		*string_nt = (char *)alloc((unsigned)*length + 1);
+	char		*string_nt = (char *)save_result;
 	int		conv_result;
 
 	/* create NUL terminated string which XmbTextListToTextProperty wants */
@@ -2411,8 +2438,6 @@ clip_x11_convert_selection_cb(
 	string_nt[*length] = NUL;
 	conv_result = XmbTextListToTextProperty(X_DISPLAY, (char **)&string_nt,
 					   1, XCompoundTextStyle, &text_prop);
-	vim_free(string_nt);
-	XtFree(*value);			/* replace with COMPOUND text */
 	if (conv_result != Success)
 	{
 	    vim_free(string);
@@ -2421,24 +2446,25 @@ clip_x11_convert_selection_cb(
 	*value = (XtPointer)(text_prop.value);	/*    from plain text */
 	*length = text_prop.nitems;
 	*type = compound_text_atom;
+	XtFree((char *)save_result);
+	save_result = (char_u *)*value;
+	save_length = *length;
     }
-
 #ifdef FEAT_MBYTE
     else if (*target == vimenc_atom)
     {
 	int l = STRLEN(p_enc);
 
-	result[0] = motion_type;
-	STRCPY(result + 1, p_enc);
-	mch_memmove(result + l + 2, string, (size_t)(*length - l - 2));
+	save_result[0] = motion_type;
+	STRCPY(save_result + 1, p_enc);
+	mch_memmove(save_result + l + 2, string, (size_t)(*length - l - 2));
 	*type = vimenc_atom;
     }
 #endif
-
     else
     {
-	result[0] = motion_type;
-	mch_memmove(result + 1, string, (size_t)(*length - 1));
+	save_result[0] = motion_type;
+	mch_memmove(save_result + 1, string, (size_t)(*length - 1));
 	*type = vim_atom;
     }
     *format = 8;	    /* 8 bits per char */
@@ -2462,6 +2488,12 @@ clip_x11_lose_selection(Widget myShell, VimClipboard *cbd)
 				XtLastTimestampProcessed(XtDisplay(myShell)));
 }
 
+    static void
+clip_x11_notify_cb(Widget w UNUSED, Atom *sel_atom UNUSED, Atom *target UNUSED)
+{
+    /* To prevent automatically freeing the selection value. */
+}
+
     int
 clip_x11_own_selection(Widget myShell, VimClipboard *cbd)
 {
@@ -2475,7 +2507,7 @@ clip_x11_own_selection(Widget myShell, VimClipboard *cbd)
 	if (XtOwnSelection(myShell, cbd->sel_atom,
 	       XtLastTimestampProcessed(XtDisplay(myShell)),
 	       clip_x11_convert_selection_cb, clip_x11_lose_ownership_cb,
-	       NULL) == False)
+	       clip_x11_notify_cb) == False)
 	    return FAIL;
     }
     else
@@ -2677,6 +2709,8 @@ retnomove:
 #ifdef FEAT_WINDOWS
 	/* find the window where the row is in */
 	wp = mouse_find_win(&row, &col);
+	if (wp == NULL)
+	    return IN_UNKNOWN;
 #else
 	wp = firstwin;
 #endif
@@ -3085,11 +3119,13 @@ mouse_comp_pos(
 /*
  * Find the window at screen position "*rowp" and "*colp".  The positions are
  * updated to become relative to the top-left of the window.
+ * Returns NULL when something is wrong.
  */
     win_T *
 mouse_find_win(int *rowp, int *colp UNUSED)
 {
     frame_T	*fp;
+    win_T	*wp;
 
     fp = topframe;
     *rowp -= firstwin->w_winrow;
@@ -3116,7 +3152,12 @@ mouse_find_win(int *rowp, int *colp UNUSED)
 	    }
 	}
     }
-    return fp->fr_win;
+    /* When using a timer that closes a window the window might not actually
+     * exist. */
+    FOR_ALL_WINDOWS(wp)
+	if (wp == fp->fr_win)
+	    return wp;
+    return NULL;
 }
 #endif
 
@@ -3139,6 +3180,8 @@ get_fpos_of_mouse(pos_T *mpos)
 #ifdef FEAT_WINDOWS
     /* find the window where the row is in */
     wp = mouse_find_win(&row, &col);
+    if (wp == NULL)
+	return IN_UNKNOWN;
 #else
     wp = firstwin;
 #endif
@@ -3185,7 +3228,7 @@ vcol2col(win_T *wp, linenr_T lnum, int vcol)
     while (count < vcol && *ptr != NUL)
     {
 	count += win_lbr_chartabsize(wp, line, ptr, count, NULL);
-	mb_ptr_adv(ptr);
+	MB_PTR_ADV(ptr);
     }
     return (int)(ptr - line);
 }
