@@ -1,11 +1,16 @@
-Description: Don't enable mouse mode by default, it breaks in chroots
-Author: Adam Conrad <adconrad@ubuntu.com>
-Bug-Ubuntu: https://launchpad.net/bugs/1661691
-Last-Update: 2017-03-17
+From: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Date: Thu, 31 Aug 2017 19:03:51 +0900
+Subject: ubuntu-mouse-off
 
---- vim-8.0.0095.orig/runtime/defaults.vim
-+++ vim-8.0.0095/runtime/defaults.vim
-@@ -64,12 +64,6 @@ map Q gq
+---
+ runtime/defaults.vim | 6 ------
+ 1 file changed, 6 deletions(-)
+
+diff --git a/runtime/defaults.vim b/runtime/defaults.vim
+index 0dcb922..42b983e 100644
+--- a/runtime/defaults.vim
++++ b/runtime/defaults.vim
+@@ -73,12 +73,6 @@ map Q gq
  " Revert with ":iunmap <C-U>".
  inoremap <C-U> <C-G>u<C-U>
  

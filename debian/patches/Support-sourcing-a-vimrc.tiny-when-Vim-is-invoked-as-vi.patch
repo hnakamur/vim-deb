@@ -17,10 +17,10 @@ Signed-off-by: James Vega <jamessan@debian.org>
  3 files changed, 19 insertions(+), 1 deletion(-)
 
 diff --git a/src/main.c b/src/main.c
-index acc51f1..3c47df2 100644
+index 5840085..cd35832 100644
 --- a/src/main.c
 +++ b/src/main.c
-@@ -1729,6 +1729,10 @@ parse_command_name(mparm_T *parmp)
+@@ -1790,6 +1790,10 @@ parse_command_name(mparm_T *parmp)
      }
      else if (STRNICMP(initstr, "vim", 3) == 0)
  	initstr += 3;
@@ -31,7 +31,7 @@ index acc51f1..3c47df2 100644
  
      /* Catch "[r][g]vimdiff" and "[r][g]viewdiff". */
      if (STRICMP(initstr, "diff") == 0)
-@@ -2967,7 +2971,12 @@ source_startup_scripts(mparm_T *parmp)
+@@ -3041,7 +3045,12 @@ source_startup_scripts(mparm_T *parmp)
  	 * Get system wide defaults, if the file name is defined.
  	 */
  #ifdef SYS_VIMRC_FILE
@@ -45,18 +45,18 @@ index acc51f1..3c47df2 100644
  #endif
  #ifdef MACOS_X
  	(void)do_source((char_u *)"$VIMRUNTIME/macmap.vim", FALSE, DOSO_NONE);
-@@ -3003,6 +3012,9 @@ source_startup_scripts(mparm_T *parmp)
+@@ -3076,6 +3085,9 @@ source_startup_scripts(mparm_T *parmp)
+ 		&& do_source((char_u *)USR_EXRC_FILE, FALSE, DOSO_NONE) == FAIL
  #ifdef USR_EXRC_FILE2
  		&& do_source((char_u *)USR_EXRC_FILE2, FALSE, DOSO_NONE) == FAIL
- #endif
++#endif
 +#if defined(SYS_TINYRC_FILE) && defined(TINY_VIMRC)
 +		&& !parmp->vi_mode
-+#endif
+ #endif
  		&& !has_dash_c_arg)
  	    {
- 		/* When no .vimrc file was found: source defaults.vim. */
 diff --git a/src/os_unix.h b/src/os_unix.h
-index d28aa4d..3a00e05 100644
+index 695affa..b6e7e59 100644
 --- a/src/os_unix.h
 +++ b/src/os_unix.h
 @@ -213,6 +213,9 @@ typedef struct dsc$descriptor   DESC;
@@ -70,10 +70,10 @@ index d28aa4d..3a00e05 100644
  # define SYS_VIMRC_FILE "$VIM/vimrc"
  #endif
 diff --git a/src/structs.h b/src/structs.h
-index c749a36..ce8632d 100644
+index 4030f6d..6e0ce80 100644
 --- a/src/structs.h
 +++ b/src/structs.h
-@@ -3257,6 +3257,9 @@ typedef struct
+@@ -3361,6 +3361,9 @@ typedef struct
  #ifdef FEAT_DIFF
      int		diff_mode;		/* start with 'diff' set */
  #endif
