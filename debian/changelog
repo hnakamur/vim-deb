@@ -1,3 +1,10 @@
+vim (2:8.0.1030-1hnakamur1) xenial; urgency=medium
+
+  * Imported Upstream version 8.0.1030
+  * Add --enable-terminal to OPTFLAGS
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Fri, 01 Sep 2017 16:50:41 +0900
+
 vim (2:8.0.1026-1hnakamur1) xenial; urgency=medium
 
   * Upstream release 8.0.1026
