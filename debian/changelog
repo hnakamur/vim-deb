@@ -1,3 +1,11 @@
+vim (2:8.0.1043-1hnakamur2) xenial; urgency=medium
+
+  * Update patches
+  * Skip terminal tests in no tty environment like pbuilder and Ubuntu
+    Launchpad
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Sun, 03 Sep 2017 11:54:21 +0900
+
 vim (2:8.0.1043-1hnakamur1) xenial; urgency=medium
 
   * Imported Upstream version 8.0.1043
