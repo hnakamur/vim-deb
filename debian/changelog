@@ -1,3 +1,10 @@
+vim (2:8.0.1043-1hnakamur1) xenial; urgency=medium
+
+  * Imported Upstream version 8.0.1043
+  * Enable terminal
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Sun, 03 Sep 2017 09:25:26 +0900
+
 vim (2:8.0.1030-1hnakamur1) xenial; urgency=medium
 
   * Imported Upstream version 8.0.1030
