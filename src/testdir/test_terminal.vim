@@ -4,6 +4,11 @@ if !has('terminal')
   finish
 endif
 
+" Skip terminal tests in no tty environment like pbuilder and Ubuntu Launchpad
+if $TERM == ""
+  finish
+endif
+
 source shared.vim
 
 let s:python = PythonProg()
