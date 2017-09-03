@@ -66,6 +66,7 @@ endif
 OPTFLAGS+=--with-features=huge
 OPTFLAGS+=--enable-multibyte
 OPTFLAGS+=--enable-acl
+OPTFLAGS+=--enable-terminal
 
 NOXFLAGS:=--without-x
 NOXFLAGS+=--enable-gui=no
