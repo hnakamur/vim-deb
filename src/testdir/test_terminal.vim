@@ -164,10 +164,10 @@ func Test_terminal_scrape_123()
   call term_wait(1234)
 
   call term_wait(buf)
-  if has('win32')
-    " TODO: this should not be needed
-    sleep 100m
-  endif
+  let g:buf = buf
+  " On MS-Windows we first get a startup message of two lines, wait for the
+  " "cls" to happen, after that we have one line.
+  call WaitFor('len(term_scrape(g:buf, 1)) == 1')
   call Check_123(buf)
 
   " Must still work after the job ended.
@@ -293,6 +293,8 @@ func Test_terminal_size()
   let size = term_getsize('')
   bwipe!
   call assert_equal([7, 27], size)
+
+  call delete('Xtext')
 endfunc
 
 func Test_terminal_curwin()
@@ -325,7 +327,7 @@ func Test_terminal_curwin()
 
   split dummy
   bwipe!
-
+  call delete('Xtext')
 endfunc
 
 func Test_finish_open_close()
@@ -458,14 +460,16 @@ endfunction
 
 func Test_terminal_noblock()
   let g:buf = term_start(&shell)
+  if has('mac')
+    " The shell or something else has a problem dealing with more than 1000
+    " characters at the same time.
+    let len = 1000
+  else
+    let len = 5000
+  endif
 
   for c in ['a','b','c','d','e','f','g','h','i','j','k']
-    call term_sendkeys(g:buf, 'echo ' . repeat(c, 5000) . "\<cr>")
-    if has('mac')
-      " TODO: this should not be needed, but without it sending keys blocks
-      " after 8000 chars or so.
-      sleep 100m
-    endif
+    call term_sendkeys(g:buf, 'echo ' . repeat(c, len) . "\<cr>")
   endfor
   call term_sendkeys(g:buf, "echo done\<cr>")
 
@@ -552,4 +556,65 @@ func Test_terminal_no_cmd()
   call term_wait(buf)
   call assert_equal('look here', term_getline(buf, 1))
   bwipe!
+endfunc
+
+func Test_terminal_special_chars()
+  " this file name only works on Unix
+  if !has('unix')
+    return
+  endif
+  call mkdir('Xdir with spaces')
+  call writefile(['x'], 'Xdir with spaces/quoted"file')
+  term ls Xdir\ with\ spaces/quoted\"file
+  call WaitFor('term_getline("", 1) =~ "quoted"')
+  call assert_match('quoted"file', term_getline('', 1))
+  call term_wait('')
+
+  call delete('Xdir with spaces', 'rf')
+  bwipe
+endfunc
+
+func Test_terminal_wrong_options()
+  call assert_fails('call term_start(&shell, {
+	\ "in_io": "file",
+	\ "in_name": "xxx",
+	\ "out_io": "file",
+	\ "out_name": "xxx",
+	\ "err_io": "file",
+	\ "err_name": "xxx"
+	\ })', 'E474:')
+  call assert_fails('call term_start(&shell, {
+	\ "out_buf": bufnr("%")
+	\ })', 'E474:')
+  call assert_fails('call term_start(&shell, {
+	\ "err_buf": bufnr("%")
+	\ })', 'E474:')
+endfunc
+
+func Test_terminal_redir_file()
+  " TODO: this should work on MS-Window
+  if has('unix')
+    let cmd = Get_cat_123_cmd()
+    let buf = term_start(cmd, {'out_io': 'file', 'out_name': 'Xfile'})
+    call term_wait(buf)
+    call WaitFor('len(readfile("Xfile")) > 0')
+    call assert_match('123', readfile('Xfile')[0])
+    call delete('Xfile')
+  endif
+
+  if has('unix')
+    let buf = term_start('xyzabc', {'err_io': 'file', 'err_name': 'Xfile'})
+    call term_wait(buf)
+    call WaitFor('len(readfile("Xfile")) > 0')
+    call assert_match('executing job failed', readfile('Xfile')[0])
+    call delete('Xfile')
+
+    call writefile(['one line'], 'Xfile')
+    let buf = term_start('cat', {'in_io': 'file', 'in_name': 'Xfile'})
+    call term_wait(buf)
+    call WaitFor('term_getline(' . buf . ', 1) == "one line"')
+    call assert_equal('one line', term_getline(buf, 1))
+    bwipe
+    call delete('Xfile')
+  endif
 endfunc
