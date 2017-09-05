@@ -1,3 +1,9 @@
+vim (2:8.0.1056-1hnakamur1) xenial; urgency=medium
+
+  * Imported Upstream version 8.0.1056
+
+ -- Hiroaki Nakamura <hnakamur@gmail.com>  Tue, 05 Sep 2017 22:20:01 +0900
+
 vim (2:8.0.1043-1hnakamur2) xenial; urgency=medium
 
   * Update patches
