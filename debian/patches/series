@@ -5,4 +5,4 @@ Document-Debian-s-decision-to-disable-modelines-by-defaul.patch
 ubuntu-grub-syntax.patch
 update-upstart-syntax.patch
 ubuntu-mouse-off.patch
-Skip-terminal-tests-in-no-tty-environment-like-pbuilder-a.patch
+Skip-terminal-tests-in-no-tty-environment-like-launchpad.patch
