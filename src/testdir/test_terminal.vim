@@ -36,11 +36,11 @@ endfunc
 func Test_terminal_basic()
   let buf = Run_shell_in_terminal({})
   if has("unix")
-    call assert_match("^/dev/", job_info(g:job).tty)
-    call assert_match("^/dev/", term_gettty(''))
+    call assert_match('^/dev/', job_info(g:job).tty_out)
+    call assert_match('^/dev/', term_gettty(''))
   else
-    call assert_match("^winpty://", job_info(g:job).tty)
-    call assert_match("^winpty://", term_gettty(''))
+    call assert_match('^\\\\.\\pipe\\', job_info(g:job).tty_out)
+    call assert_match('^\\\\.\\pipe\\', term_gettty(''))
   endif
   call assert_equal('t', mode())
   call assert_match('%aR[^\n]*running]', execute('ls'))
@@ -104,6 +104,15 @@ func! s:Nasty_exit_cb(job, st)
   let g:buf = 0
 endfunc
 
+func Get_cat_123_cmd()
+  if has('win32')
+    return 'cmd /c "cls && color 2 && echo 123"'
+  else
+    call writefile(["\<Esc>[32m123"], 'Xtext')
+    return "cat Xtext"
+  endif
+endfunc
+
 func Test_terminal_nasty_cb()
   let cmd = Get_cat_123_cmd()
   let g:buf = term_start(cmd, {'exit_cb': function('s:Nasty_exit_cb')})
@@ -143,15 +152,6 @@ func Check_123(buf)
   call assert_equal('123', l)
 endfunc
 
-func Get_cat_123_cmd()
-  if has('win32')
-    return 'cmd /c "cls && color 2 && echo 123"'
-  else
-    call writefile(["\<Esc>[32m123"], 'Xtext')
-    return "cat Xtext"
-  endif
-endfunc
-
 func Test_terminal_scrape_123()
   let cmd = Get_cat_123_cmd()
   let buf = term_start(cmd)
@@ -166,8 +166,8 @@ func Test_terminal_scrape_123()
   call term_wait(buf)
   let g:buf = buf
   " On MS-Windows we first get a startup message of two lines, wait for the
-  " "cls" to happen, after that we have one line.
-  call WaitFor('len(term_scrape(g:buf, 1)) == 1')
+  " "cls" to happen, after that we have one line with three characters.
+  call WaitFor('len(term_scrape(g:buf, 1)) == 3')
   call Check_123(buf)
 
   " Must still work after the job ended.
@@ -393,7 +393,6 @@ func Test_finish_open_close()
   call assert_equal(2, winnr('$'))
   call assert_equal(4, winheight(0))
   bwipe
-
 endfunc
 
 func Test_terminal_cwd()
@@ -539,10 +538,6 @@ func Test_terminal_write_stdin()
 endfunc
 
 func Test_terminal_no_cmd()
-  " Todo: make this work on all systems.
-  if !has('unix')
-    return
-  endif
   " Todo: make this work in the GUI
   if !has('gui_running')
     return
@@ -550,11 +545,20 @@ func Test_terminal_no_cmd()
   let buf = term_start('NONE', {})
   call assert_notequal(0, buf)
 
-  let pty = job_info(term_getjob(buf))['tty']
+  let pty = job_info(term_getjob(buf))['tty_out']
   call assert_notequal('', pty)
-  call system('echo "look here" > ' . pty)
+  if has('win32')
+    silent exe '!cmd /c "echo look here > ' . pty . '"'
+  else
+    call system('echo "look here" > ' . pty)
+  endif
   call term_wait(buf)
-  call assert_equal('look here', term_getline(buf, 1))
+
+  let result = term_getline(buf, 1)
+  if has('win32')
+    let result = substitute(result, '\s\+$', '', '')
+  endif
+  call assert_equal('look here', result)
   bwipe!
 endfunc
 
@@ -600,20 +604,17 @@ func Test_terminal_redir_file()
     call WaitFor('len(readfile("Xfile")) > 0')
     call assert_match('123', readfile('Xfile')[0])
     call delete('Xfile')
+    bwipe
   endif
 
   if has('unix')
-    let buf = term_start('xyzabc', {'err_io': 'file', 'err_name': 'Xfile'})
-    call term_wait(buf)
-    call WaitFor('len(readfile("Xfile")) > 0')
-    call assert_match('executing job failed', readfile('Xfile')[0])
-    call delete('Xfile')
-
     call writefile(['one line'], 'Xfile')
     let buf = term_start('cat', {'in_io': 'file', 'in_name': 'Xfile'})
     call term_wait(buf)
     call WaitFor('term_getline(' . buf . ', 1) == "one line"')
     call assert_equal('one line', term_getline(buf, 1))
+    let g:job = term_getjob(buf)
+    call WaitFor('job_status(g:job) == "dead"')
     bwipe
     call delete('Xfile')
   endif
