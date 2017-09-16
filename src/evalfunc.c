@@ -3259,11 +3259,18 @@ f_feedkeys(typval_T *argvars, typval_T *rettv UNUSED)
 		/* Avoid a 1 second delay when the keys start Insert mode. */
 		msg_scroll = FALSE;
 
-		if (!dangerous)
-		    ++ex_normal_busy;
-		exec_normal(TRUE);
-		if (!dangerous)
-		    --ex_normal_busy;
+#ifdef FEAT_TERMINAL
+		if (term_use_loop())
+		    terminal_loop(FALSE);
+		else
+#endif
+		{
+		    if (!dangerous)
+			++ex_normal_busy;
+		    exec_normal(TRUE);
+		    if (!dangerous)
+			--ex_normal_busy;
+		}
 		msg_scroll |= save_msg_scroll;
 	    }
 	}
@@ -4826,7 +4833,7 @@ get_qf_loc_list(int is_qf, win_T *wp, typval_T *what_arg, typval_T *rettv)
 		    dict_T	*d = what_arg->vval.v_dict;
 
 		    if (d != NULL)
-			get_errorlist_properties(wp, d, rettv->vval.v_dict);
+			qf_get_properties(wp, d, rettv->vval.v_dict);
 		}
 		else
 		    EMSG(_(e_dictreq));

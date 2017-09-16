@@ -197,7 +197,7 @@ func Test_terminal_scrape_multibyte()
     let g:line = 1
   endif
 
-  call WaitFor('term_scrape(g:buf, g:line)[0].chars == "l"')
+  call WaitFor('len(term_scrape(g:buf, g:line)) >= 7 && term_scrape(g:buf, g:line)[0].chars == "l"')
   let l = term_scrape(g:buf, g:line)
   call assert_true(len(l) >= 7)
   call assert_equal('l', l[0].chars)
@@ -396,14 +396,13 @@ func Test_finish_open_close()
 endfunc
 
 func Test_terminal_cwd()
-  if !has('unix')
+  if !executable('pwd')
     return
   endif
   call mkdir('Xdir')
   let buf = term_start('pwd', {'cwd': 'Xdir'})
-  sleep 100m
-  call term_wait(buf)
-  call assert_equal(getcwd() . '/Xdir', getline(1))
+  call WaitFor('"Xdir" == fnamemodify(getline(1), ":t")')
+  call assert_equal('Xdir', fnamemodify(getline(1), ":t"))
 
   exe buf . 'bwipe'
   call delete('Xdir', 'rf')
@@ -603,6 +602,8 @@ func Test_terminal_redir_file()
     call term_wait(buf)
     call WaitFor('len(readfile("Xfile")) > 0')
     call assert_match('123', readfile('Xfile')[0])
+    let g:job = term_getjob(buf)
+    call WaitFor('job_status(g:job) == "dead"')
     call delete('Xfile')
     bwipe
   endif
@@ -618,4 +619,41 @@ func Test_terminal_redir_file()
     bwipe
     call delete('Xfile')
   endif
+endfunc
+
+func TerminalTmap(remap)
+  let buf = Run_shell_in_terminal({})
+  call assert_equal('t', mode())
+
+  if a:remap
+    tmap 123 456
+  else
+    tnoremap 123 456
+  endif
+  tmap 456 abcde
+  call assert_equal('456', maparg('123', 't'))
+  call assert_equal('abcde', maparg('456', 't'))
+  call feedkeys("123", 'tx')
+  call term_wait(buf)
+  let lnum = term_getcursor(buf)[0]
+  if a:remap
+    call assert_match('abcde', term_getline(buf, lnum))
+  else
+    call assert_match('456', term_getline(buf, lnum))
+  endif
+
+  call term_sendkeys(buf, "\r")
+  call Stop_shell_in_terminal(buf)
+  call term_wait(buf)
+
+  tunmap 123
+  tunmap 456
+  call assert_equal('', maparg('123', 't'))
+  close
+  unlet g:job
+endfunc
+
+func Test_terminal_tmap()
+  call TerminalTmap(1)
+  call TerminalTmap(0)
 endfunc
