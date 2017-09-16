@@ -1,0 +1,21 @@
+From: Hiroaki Nakamura <hnakamur@gmail.com>
+Date: Sun, 10 Sep 2017 07:55:21 +0900
+Subject: Release 2:8.0.1086-1hnakamur1
+
+---
+ debian/changelog | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/debian/changelog b/debian/changelog
+index 9808c89..42ae562 100644
+--- a/debian/changelog
++++ b/debian/changelog
+@@ -2,7 +2,7 @@ vim (2:8.0.1086-1hnakamur1) xenial; urgency=medium
+ 
+   * Imported Upstream version 8.0.1086
+ 
+- -- Hiroaki Nakamura <hnakamur@gmail.com>  Sun, 10 Sep 2017 08:21:10 +0900
++ -- Hiroaki Nakamura <hnakamur@gmail.com>  Sun, 10 Sep 2017 07:54:48 +0900
+ 
+ vim (2:8.0.1056-1hnakamur1) xenial; urgency=medium
+ 
