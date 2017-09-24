@@ -2290,10 +2290,8 @@ vgetorpeek(int advance)
 				msg_row = Rows - 1;
 				msg_clr_eos();		/* clear ruler */
 			    }
-#ifdef FEAT_WINDOWS
 			    status_redraw_all();
 			    redraw_statuslines();
-#endif
 			    showmode();
 			    setcursor();
 			    continue;
@@ -2668,8 +2666,8 @@ vgetorpeek(int advance)
 					++col;
 				}
 				curwin->w_wrow = curwin->w_cline_row
-					   + curwin->w_wcol / W_WIDTH(curwin);
-				curwin->w_wcol %= W_WIDTH(curwin);
+					   + curwin->w_wcol / curwin->w_width;
+				curwin->w_wcol %= curwin->w_width;
 				curwin->w_wcol += curwin_col_off();
 #ifdef FEAT_MBYTE
 				col = 0;	/* no correction needed */
@@ -2686,7 +2684,7 @@ vgetorpeek(int advance)
 			else if (curwin->w_p_wrap && curwin->w_wrow)
 			{
 			    --curwin->w_wrow;
-			    curwin->w_wcol = W_WIDTH(curwin) - 1;
+			    curwin->w_wcol = curwin->w_width - 1;
 #ifdef FEAT_MBYTE
 			    col = curwin->w_cursor.col - 1;
 #endif
