@@ -7378,6 +7378,7 @@ do_highlight(
     int		id;
     int		idx;
     struct hl_group item_before;
+    int		did_change = FALSE;
     int		dodefault = FALSE;
     int		doclear = FALSE;
     int		dolink = FALSE;
@@ -7787,6 +7788,7 @@ do_highlight(
 		/* GUI not started yet, always accept the name. */
 		vim_free(HL_TABLE()[idx].sg_font_name);
 		HL_TABLE()[idx].sg_font_name = vim_strsave(arg);
+		did_change = TRUE;
 	    }
 	    else
 	    {
@@ -7815,6 +7817,7 @@ do_highlight(
 		    gui_mch_free_fontset(temp_sg_fontset);
 		    vim_free(HL_TABLE()[idx].sg_font_name);
 		    HL_TABLE()[idx].sg_font_name = vim_strsave(arg);
+		    did_change = TRUE;
 		}
 		else
 		    HL_TABLE()[idx].sg_fontset = temp_sg_fontset;
@@ -7826,6 +7829,7 @@ do_highlight(
 		    gui_mch_free_font(temp_sg_font);
 		    vim_free(HL_TABLE()[idx].sg_font_name);
 		    HL_TABLE()[idx].sg_font_name = vim_strsave(arg);
+		    did_change = TRUE;
 		}
 		else
 		    HL_TABLE()[idx].sg_font = temp_sg_font;
@@ -7970,6 +7974,8 @@ do_highlight(
 	else if (STRCMP(key, "GUIFG") == 0)
 	{
 #if defined(FEAT_GUI) || defined(FEAT_EVAL)
+	    char_u **namep = &HL_TABLE()[idx].sg_gui_fg_name;
+
 	    if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI))
 	    {
 		if (!init)
@@ -7982,22 +7988,34 @@ do_highlight(
 		{
 		    HL_TABLE()[idx].sg_gui_fg = i;
 # endif
-		    vim_free(HL_TABLE()[idx].sg_gui_fg_name);
-		    if (STRCMP(arg, "NONE") != 0)
-			HL_TABLE()[idx].sg_gui_fg_name = vim_strsave(arg);
-		    else
-			HL_TABLE()[idx].sg_gui_fg_name = NULL;
+		    if (*namep == NULL || STRCMP(*namep, arg) != 0)
+		    {
+			vim_free(*namep);
+			if (STRCMP(arg, "NONE") != 0)
+			    *namep = vim_strsave(arg);
+			else
+			    *namep = NULL;
+			did_change = TRUE;
+		    }
 # if defined(FEAT_GUI) || defined(FEAT_TERMGUICOLORS)
 #  ifdef FEAT_GUI_X11
-		    if (is_menu_group)
+		    if (is_menu_group && gui.menu_fg_pixel != i)
+		    {
 			gui.menu_fg_pixel = i;
-		    if (is_scrollbar_group)
+			do_colors = TRUE;
+		    }
+		    if (is_scrollbar_group && gui.scroll_fg_pixel != i)
+		    {
 			gui.scroll_fg_pixel = i;
+			do_colors = TRUE;
+		    }
 #   ifdef FEAT_BEVAL
-		    if (is_tooltip_group)
+		    if (is_tooltip_group && gui.tooltip_fg_pixel != i)
+		    {
 			gui.tooltip_fg_pixel = i;
+			do_colors = TRUE;
+		    }
 #   endif
-		    do_colors = TRUE;
 #  endif
 		}
 # endif
@@ -8007,6 +8025,8 @@ do_highlight(
 	else if (STRCMP(key, "GUIBG") == 0)
 	{
 #if defined(FEAT_GUI) || defined(FEAT_EVAL)
+	    char_u **namep = &HL_TABLE()[idx].sg_gui_bg_name;
+
 	    if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI))
 	    {
 		if (!init)
@@ -8019,22 +8039,34 @@ do_highlight(
 		{
 		    HL_TABLE()[idx].sg_gui_bg = i;
 # endif
-		    vim_free(HL_TABLE()[idx].sg_gui_bg_name);
-		    if (STRCMP(arg, "NONE") != 0)
-			HL_TABLE()[idx].sg_gui_bg_name = vim_strsave(arg);
-		    else
-			HL_TABLE()[idx].sg_gui_bg_name = NULL;
+		    if (*namep == NULL || STRCMP(*namep, arg) != 0)
+		    {
+			vim_free(*namep);
+			if (STRCMP(arg, "NONE") != 0)
+			    *namep = vim_strsave(arg);
+			else
+			    *namep = NULL;
+			did_change = TRUE;
+		    }
 # if defined(FEAT_GUI) || defined(FEAT_TERMGUICOLORS)
 #  ifdef FEAT_GUI_X11
-		    if (is_menu_group)
+		    if (is_menu_group && gui.menu_bg_pixel != i)
+		    {
 			gui.menu_bg_pixel = i;
-		    if (is_scrollbar_group)
+			do_colors = TRUE;
+		    }
+		    if (is_scrollbar_group && gui.scroll_bg_pixel != i)
+		    {
 			gui.scroll_bg_pixel = i;
+			do_colors = TRUE;
+		    }
 #   ifdef FEAT_BEVAL
-		    if (is_tooltip_group)
+		    if (is_tooltip_group && gui.tooltip_bg_pixel != i)
+		    {
 			gui.tooltip_bg_pixel = i;
+			do_colors = TRUE;
+		    }
 #   endif
-		    do_colors = TRUE;
 #  endif
 		}
 # endif
@@ -8044,6 +8076,8 @@ do_highlight(
 	else if (STRCMP(key, "GUISP") == 0)
 	{
 #if defined(FEAT_GUI) || defined(FEAT_EVAL)
+	    char_u **namep = &HL_TABLE()[idx].sg_gui_sp_name;
+
 	    if (!init || !(HL_TABLE()[idx].sg_set & SG_GUI))
 	    {
 		if (!init)
@@ -8055,11 +8089,15 @@ do_highlight(
 		{
 		    HL_TABLE()[idx].sg_gui_sp = i;
 # endif
-		    vim_free(HL_TABLE()[idx].sg_gui_sp_name);
-		    if (STRCMP(arg, "NONE") != 0)
-			HL_TABLE()[idx].sg_gui_sp_name = vim_strsave(arg);
-		    else
-			HL_TABLE()[idx].sg_gui_sp_name = NULL;
+		    if (*namep == NULL || STRCMP(*namep, arg) != 0)
+		    {
+			vim_free(*namep);
+			if (STRCMP(arg, "NONE") != 0)
+			    *namep = vim_strsave(arg);
+			else
+			    *namep = NULL;
+			did_change = TRUE;
+		    }
 # ifdef FEAT_GUI
 		}
 # endif
@@ -8228,13 +8266,18 @@ do_highlight(
 
     /* Only call highlight_changed() once, after a sequence of highlight
      * commands, and only if an attribute actually changed. */
-    if (memcmp(&HL_TABLE()[idx], &item_before, sizeof(item_before)) != 0
+    if ((did_change
+	   || memcmp(&HL_TABLE()[idx], &item_before, sizeof(item_before)) != 0)
 #if defined(FEAT_GUI) || defined(FEAT_TERMGUICOLORS)
 	    && !did_highlight_changed
 #endif
        )
     {
-	redraw_all_later(NOT_VALID);
+	/* Do not trigger a redraw when highlighting is changed while
+	 * redrawing.  This may happen when evaluating 'statusline' changes the
+	 * StatusLine group. */
+	if (!updating_screen)
+	    redraw_all_later(NOT_VALID);
 	need_highlight_changed = TRUE;
     }
 }
@@ -9755,7 +9798,7 @@ syn_id2colors(int hl_id, guicolor_T *fgp, guicolor_T *bgp)
 }
 #endif
 
-#if defined(FEAT_TERMINAL) || defined(PROT)
+#if defined(FEAT_TERMINAL) || defined(PROTO)
     void
 syn_id2cterm_bg(int hl_id, int *fgp, int *bgp)
 {
