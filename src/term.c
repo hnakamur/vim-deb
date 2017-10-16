@@ -125,7 +125,7 @@ static int crv_status = STATUS_GET;
 /* Request Cursor position report: */
 static int u7_status = STATUS_GET;
 
-#ifdef FEAT_TERMINAL
+#  ifdef FEAT_TERMINAL
 /* Request foreground color report: */
 static int rfg_status = STATUS_GET;
 static int fg_r = 0;
@@ -134,7 +134,7 @@ static int fg_b = 0;
 static int bg_r = 255;
 static int bg_g = 255;
 static int bg_b = 255;
-#endif
+#  endif
 
 /* Request background color report: */
 static int rbg_status = STATUS_GET;
@@ -3529,7 +3529,7 @@ may_req_bg_color(void)
     {
 	int didit = FALSE;
 
-#ifdef FEAT_TERMINAL
+# ifdef FEAT_TERMINAL
 	/* Only request foreground if t_RF is set. */
 	if (rfg_status == STATUS_GET && *T_RFG != NUL)
 	{
@@ -3538,7 +3538,7 @@ may_req_bg_color(void)
 	    rfg_status = STATUS_SENT;
 	    didit = TRUE;
 	}
-#endif
+# endif
 
 	/* Only request background if t_RB is set. */
 	if (rbg_status == STATUS_GET && *T_RBG != NUL)
@@ -5828,12 +5828,12 @@ check_termcode(
     return 0;			    /* no match found */
 }
 
-#if defined(FEAT_TERMINAL) || defined(PROTO)
+#if (defined(FEAT_TERMINAL) && defined(FEAT_TERMRESPONSE)) || defined(PROTO)
 /*
  * Get the text foreground color, if known.
  */
     void
-term_get_fg_color(uint8_t *r, uint8_t *g, uint8_t *b)
+term_get_fg_color(char_u *r, char_u *g, char_u *b)
 {
     if (rfg_status == STATUS_GOT)
     {
@@ -5847,7 +5847,7 @@ term_get_fg_color(uint8_t *r, uint8_t *g, uint8_t *b)
  * Get the text background color, if known.
  */
     void
-term_get_bg_color(uint8_t *r, uint8_t *g, uint8_t *b)
+term_get_bg_color(char_u *r, char_u *g, char_u *b)
 {
     if (rbg_status == STATUS_GOT)
     {
